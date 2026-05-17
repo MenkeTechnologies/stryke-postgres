@@ -1,0 +1,378 @@
+# lib/Postgres.stk — PostgreSQL client for stryke (single-shot).
+#
+# Architecture mirrors stryke-mysql: thin stryke wrapper invokes the
+# `stryke-postgres-helper` Rust binary (postgres crate) per call, parses
+# NDJSON rows from its stdout.
+#
+# v1 is single-shot — every query opens a fresh connection. The helper
+# already implements a long-running JSON-RPC `serve` mode on a Unix socket;
+# the stryke side will pick that up once stryke gains a Unix-socket client
+# builtin. For hot loops today, use a multi-row INSERT or the CLI
+# `postgres exec --file=script.sql` pattern.
+#
+# DSN sources (priority order):
+#   1. `dsn => "postgres://..."` named arg
+#   2. `$ENV{POSTGRES_DSN}` (or `$ENV{DATABASE_URL}`)
+#   3. Individual host/port/user/password/database args
+#
+# Note: internal helpers pass `$opts` as a hashref rather than `%opts` slurp
+# because stryke currently drops named opts when flattening through nested
+# same-package calls loaded from a required file. Public API still accepts
+# `%opts` named-args for caller ergonomics.
+
+package Postgres
+
+our $HELPER
+
+fn Postgres::pkg_root {
+    my @parts = split "/", __FILE__
+    pop @parts
+    pop @parts
+    my $root = join "/", @parts
+    $root ne "" ? $root : "."
+}
+
+fn Postgres::helper_path {
+    return $Postgres::HELPER if defined $Postgres::HELPER && -x $Postgres::HELPER
+
+    if (exists $ENV{STRYKE_POSTGRES_HELPER} && $ENV{STRYKE_POSTGRES_HELPER} ne "") {
+        my $p = $ENV{STRYKE_POSTGRES_HELPER}
+        die "stryke-postgres: STRYKE_POSTGRES_HELPER=$p is not an executable file" unless -x $p
+        $Postgres::HELPER = $p
+        return $p
+    }
+
+    my $root = Postgres::pkg_root()
+    for my $cand (
+        "$root/target/release/stryke-postgres-helper",
+        "$root/target/debug/stryke-postgres-helper",
+        "$root/bin/stryke-postgres-helper",
+    ) {
+        if (-x $cand) {
+            $Postgres::HELPER = $cand
+            return $cand
+        }
+    }
+
+    my $which = qx{command -v stryke-postgres-helper 2>/dev/null}
+    chomp $which
+    if ($which ne "" && -x $which) {
+        $Postgres::HELPER = $which
+        return $which
+    }
+
+    die "stryke-postgres: helper binary not found.\n" .
+        "  Build it once with:  cd $root && cargo build --release\n" .
+        "  Or set STRYKE_POSTGRES_HELPER=/path/to/stryke-postgres-helper\n"
+}
+
+fn Postgres::ensure_built {
+    my $root = Postgres::pkg_root()
+    for my $cand ("$root/target/release/stryke-postgres-helper",
+                  "$root/target/debug/stryke-postgres-helper") {
+        return $cand if -x $cand
+    }
+    return Postgres::helper_path() if exists $ENV{STRYKE_POSTGRES_HELPER}
+
+    p "stryke-postgres: building helper (cargo build --release)..."
+    my $rc = system "cd " . Postgres::_shq($root) . " && cargo build --release"
+    die "stryke-postgres: cargo build failed (rc=$rc)" if $rc != 0
+    Postgres::helper_path()
+}
+
+# Single-quote shell-escape: wrap in '…' and replace embedded ' with '\'' .
+fn Postgres::_shq ($s) {
+    my $t = $s
+    $t =~ s/'/'\\''/g
+    "'$t'"
+}
+
+# Build the leading `helper subcmd …connection-flags…` portion of the
+# command line. $o is a hashref.
+fn Postgres::_conn_argv ($o) {
+    my @argv = (Postgres::_shq(Postgres::helper_path()))
+
+    my $dsn = $o->{dsn} // $ENV{POSTGRES_DSN} // $ENV{DATABASE_URL}
+    if (defined $dsn && $dsn ne "") {
+        push @argv, "--dsn", Postgres::_shq($dsn)
+    }
+    for my $pair (
+        [host             => "--host"],
+        [port             => "--port"],
+        [user             => "--user"],
+        [password         => "--password"],
+        [database         => "--database"],
+        [application_name => "--application-name"],
+    ) {
+        my ($k, $flag) = @$pair
+        if (exists $o->{$k} && defined $o->{$k}) {
+            push @argv, $flag, Postgres::_shq($o->{$k})
+        }
+    }
+    if (exists $o->{connect_timeout} && defined $o->{connect_timeout}) {
+        push @argv, "--connect-timeout", Postgres::_shq($o->{connect_timeout})
+    }
+    @argv
+}
+
+fn Postgres::_bind_flag ($bind) {
+    return () unless defined $bind
+    ("--bind", Postgres::_shq(to_json $bind))
+}
+
+fn Postgres::_drain_ndjson ($fh) {
+    my @rows
+    while (my $line = <$fh>) {
+        chomp $line
+        next if $line eq ""
+        push @rows, from_json $line
+    }
+    @rows
+}
+
+fn Postgres::_run_ndjson ($argv) {
+    my $cmd = join " ", @$argv
+    open my $fh, "-|", $cmd or die "stryke-postgres: spawn failed: $!"
+    my @rows = Postgres::_drain_ndjson $fh
+    close $fh or die "stryke-postgres: helper exited ($?)"
+    @rows
+}
+
+fn Postgres::_run_json ($argv) {
+    my $cmd = join " ", @$argv
+    my $out = qx{$cmd}
+    die "stryke-postgres: helper exited ($?)" if $? != 0
+    from_json $out
+}
+
+# ---------------------------------------------------------------------------
+# Public read API
+# ---------------------------------------------------------------------------
+
+fn Postgres::query ($sql, %opts) {
+    Postgres::_query_impl($sql, \%opts)
+}
+
+fn Postgres::_query_impl ($sql, $o) {
+    my @argv = Postgres::_conn_argv($o)
+    push @argv, "query", Postgres::_shq($sql)
+    push @argv, Postgres::_bind_flag($o->{bind})
+    push @argv, "--columnar" if $o->{columnar}
+    push @argv, "--with-meta" if $o->{with_meta}
+    if (defined $o->{limit}) {
+        push @argv, "--limit", Postgres::_shq($o->{limit})
+    }
+    if ($ENV{STRYKE_POSTGRES_DEBUG}) {
+        warn "DEBUG postgres cmd: " . join(" ", @argv) . "\n"
+    }
+
+    if ($o->{columnar}) {
+        return Postgres::_run_json(\@argv)
+    }
+    if ($o->{with_meta}) {
+        my $cmd = join " ", @argv
+        my $out = qx{$cmd}
+        die "Postgres::query: helper exited ($?)" if $? != 0
+        return Postgres::_parse_metarows($out)
+    }
+    Postgres::_run_ndjson(\@argv)
+}
+
+# Streaming variant: callback fires once per row. Returns the count.
+fn Postgres::query_stream ($sql, %opts) {
+    my $cb = $opts{callback}
+    die "Postgres::query_stream: callback => sub { … } is required" unless defined $cb
+
+    my @argv = Postgres::_conn_argv(\%opts)
+    push @argv, "query", Postgres::_shq($sql)
+    push @argv, Postgres::_bind_flag($opts{bind})
+    if (defined $opts{limit}) {
+        push @argv, "--limit", Postgres::_shq($opts{limit})
+    }
+    my $cmd = join " ", @argv
+
+    my $n = 0
+    open my $fh, "-|", $cmd or die "Postgres::query_stream: spawn failed: $!"
+    while (my $line = <$fh>) {
+        chomp $line
+        next if $line eq ""
+        $cb->(from_json $line)
+        $n++
+    }
+    close $fh or die "Postgres::query_stream: helper exited ($?)"
+    $n
+}
+
+fn Postgres::_parse_metarows ($buf) {
+    my @lines = split /\n/, $buf
+    my @rows
+    my $meta = {}
+    for my $line (@lines) {
+        next if $line eq ""
+        my $v = from_json $line
+        if (ref($v) eq "HASH" && exists $v->{meta}) {
+            $meta = $v->{meta}
+        } else {
+            push @rows, $v
+        }
+    }
+    { meta => $meta, rows => \@rows }
+}
+
+# Single row (or undef). Adds LIMIT 1 server-side.
+fn Postgres::query_one ($sql, %opts) {
+    $opts{limit} = 1
+    my @r = Postgres::_query_impl($sql, \%opts)
+    @r ? $r[0] : undef
+}
+
+# First column of every row.
+fn Postgres::query_col ($sql, %opts) {
+    my @rows = Postgres::_query_impl($sql, \%opts)
+    return () unless @rows
+    my @keys = keys %{ $rows[0] }
+    my $first = $keys[0]
+    map { $_->{$first} } @rows
+}
+
+# Single scalar (first column of first row, or undef).
+fn Postgres::query_scalar ($sql, %opts) {
+    $opts{limit} = 1
+    my @r = Postgres::_query_impl($sql, \%opts)
+    return undef unless @r
+    my @keys = keys %{ $r[0] }
+    $r[0]->{$keys[0]}
+}
+
+# ---------------------------------------------------------------------------
+# Public write API
+# ---------------------------------------------------------------------------
+
+# Returns { affected_rows }.
+fn Postgres::execute ($sql, %opts) {
+    my @argv = Postgres::_conn_argv(\%opts)
+    push @argv, "execute", Postgres::_shq($sql)
+    push @argv, Postgres::_bind_flag($opts{bind})
+    Postgres::_run_json(\@argv)
+}
+
+# Multi-statement script.
+fn Postgres::exec_file ($path, %opts) {
+    die "Postgres::exec_file: file `$path` not found" unless -e $path
+    my @argv = Postgres::_conn_argv(\%opts)
+    push @argv, "exec", "--file", Postgres::_shq($path)
+    Postgres::_run_json(\@argv)
+}
+
+# Bulk insert. Builds `INSERT INTO "t" ("a","b") VALUES ($1,$2),($3,$4)…`.
+# Use `returning => "id"` to fetch generated IDs back (executes as a query
+# and returns rows, not a {affected_rows} object).
+fn Postgres::insert_many ($table, $rows, %opts) {
+    my $arr = ref($rows) eq "ARRAY" ? $rows : [$rows]
+    return { affected_rows => 0 } unless @$arr
+
+    my @cols = sort keys %{ $arr->[0] }
+    my $ncols = len @cols
+    my $nrows = len(@$arr)
+
+    # Build $1, $2, … placeholders grouped per row.
+    my @tuples
+    my $pno = 1
+    for (my $r = 0; $r < $nrows; $r++) {
+        my @ph
+        for (my $c = 0; $c < $ncols; $c++) {
+            push @ph, "\$$pno"
+            $pno++
+        }
+        push @tuples, "(" . join(",", @ph) . ")"
+    }
+    my $cols_sql = join(",", map { "\"$_\"" } @cols)
+    my $sql = "INSERT INTO \"$table\" ($cols_sql) VALUES " . join(",", @tuples)
+    if (defined $opts{returning}) {
+        $sql .= " RETURNING $opts{returning}"
+    }
+
+    my @bind
+    for my $row (@$arr) {
+        for my $c (@cols) {
+            push @bind, $row->{$c}
+        }
+    }
+    $opts{bind} = \@bind
+    if (defined $opts{returning}) {
+        Postgres::_query_impl($sql, \%opts)
+    } else {
+        my @argv = Postgres::_conn_argv(\%opts)
+        push @argv, "execute", Postgres::_shq($sql)
+        push @argv, Postgres::_bind_flag(\@bind)
+        Postgres::_run_json(\@argv)
+    }
+}
+
+# ---------------------------------------------------------------------------
+# Metadata
+# ---------------------------------------------------------------------------
+
+fn Postgres::ping (%opts) {
+    my @argv = Postgres::_conn_argv(\%opts)
+    push @argv, "ping"
+    my $cmd = join " ", @argv
+    my $out = qx{$cmd 2>/dev/null}
+    chomp $out
+    $? == 0 && $out eq "ok"
+}
+
+fn Postgres::tables (%opts) {
+    my @argv = Postgres::_conn_argv(\%opts)
+    push @argv, "tables"
+    if (defined $opts{schema}) {
+        push @argv, "--schema", Postgres::_shq($opts{schema})
+    }
+    map { $_->{name} } Postgres::_run_ndjson(\@argv)
+}
+
+fn Postgres::databases (%opts) {
+    my @argv = Postgres::_conn_argv(\%opts)
+    push @argv, "databases"
+    map { $_->{name} } Postgres::_run_ndjson(\@argv)
+}
+
+# { table, schema, columns => [...], indexes => [...] } via information_schema + pg_indexes.
+fn Postgres::schema ($table, %opts) {
+    my @argv = Postgres::_conn_argv(\%opts)
+    push @argv, "schema", "--table", Postgres::_shq($table)
+    if (defined $opts{schema}) {
+        push @argv, "--schema", Postgres::_shq($opts{schema})
+    }
+    Postgres::_run_json(\@argv)
+}
+
+fn Postgres::dump ($table, %opts) {
+    my @argv = Postgres::_conn_argv(\%opts)
+    push @argv, "dump", "--table", Postgres::_shq($table)
+    if (defined $opts{columns}) {
+        my $cols = ref($opts{columns}) eq "ARRAY"
+            ? join(",", @{ $opts{columns} })
+            : $opts{columns}
+        push @argv, "--columns", Postgres::_shq($cols)
+    }
+    if (defined $opts{where}) {
+        push @argv, "--where", Postgres::_shq($opts{where})
+    }
+    if (defined $opts{order_by}) {
+        push @argv, "--order-by", Postgres::_shq($opts{order_by})
+    }
+    if (defined $opts{limit}) {
+        push @argv, "--limit", Postgres::_shq($opts{limit})
+    }
+    Postgres::_run_ndjson(\@argv)
+}
+
+fn Postgres::version {
+    my $bin = Postgres::_shq(Postgres::helper_path())
+    my $v = qx{$bin --version 2>&1}
+    chomp $v
+    $v
+}
+
+1

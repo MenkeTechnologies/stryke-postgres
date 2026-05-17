@@ -1,0 +1,139 @@
+# t/test_postgres.stk — round-trip tests against a live Postgres.
+#
+# Skips cleanly when $POSTGRES_DSN is unset OR the helper isn't built.
+# Local dev:
+#   export POSTGRES_DSN="postgres://wizard@127.0.0.1:5432/stryke_test"
+
+require "./lib/Postgres.stk"
+
+my $have_helper = eval { Postgres::helper_path(); 1 }
+my $dsn = $ENV{POSTGRES_DSN} // $ENV{DATABASE_URL}
+
+unless ($have_helper) {
+    p "1..0 # SKIP helper not built — run `cargo build --release` first"
+    exit 0
+}
+unless (defined $dsn && $dsn ne "") {
+    p "1..0 # SKIP \$POSTGRES_DSN not set"
+    exit 0
+}
+unless (Postgres::ping(dsn => $dsn)) {
+    p "1..0 # SKIP cannot connect to $dsn"
+    exit 0
+}
+
+my $tbl = "stryke_postgres_test_$$"
+p "1..11"
+my $i = 0
+
+eval { Postgres::execute("DROP TABLE IF EXISTS $tbl", dsn => $dsn) }
+my $r
+eval {
+    $r = Postgres::execute(
+        "CREATE TABLE $tbl (id SERIAL PRIMARY KEY, name TEXT, score DOUBLE PRECISION, payload JSONB)",
+        dsn => $dsn,
+    )
+}
+$i++
+p $@ ? "not ok $i - create table: $@" : "ok $i - create table"
+
+eval {
+    $r = Postgres::execute(
+        "INSERT INTO $tbl (name, score, payload) VALUES (\$1,\$2,\$3),(\$4,\$5,\$6),(\$7,\$8,\$9)",
+        dsn  => $dsn,
+        bind => ["alice", 1.5, {color => "blue"},
+                 "bob",   2.0, {color => "red"},
+                 "charlie", 3.25, {color => "green"}],
+    )
+}
+$i++
+p $@ ? "not ok $i - insert: $@" :
+       ($r->{affected_rows} == 3 ? "ok $i - insert 3 rows" :
+        "not ok $i - insert affected=$r->{affected_rows}")
+
+my @rows
+eval { @rows = Postgres::query("SELECT * FROM $tbl ORDER BY id", dsn => $dsn) }
+$i++
+p $@ ? "not ok $i - select: $@" :
+       (len(@rows) == 3 ? "ok $i - select 3 rows" :
+        "not ok $i - select got " . len(@rows) . " rows")
+
+eval { @rows = Postgres::query("SELECT * FROM $tbl WHERE name = \$1", dsn => $dsn, bind => ["bob"]) }
+$i++
+p $@ ? "not ok $i - bind query: $@" :
+       (len(@rows) == 1 && $rows[0]->{name} eq "bob"
+            ? "ok $i - bind query"
+            : "not ok $i - bind query wrong shape")
+
+my $scalar
+eval { $scalar = Postgres::query_scalar("SELECT COUNT(*) AS n FROM $tbl", dsn => $dsn) }
+$i++
+p $@ ? "not ok $i - query_scalar: $@" :
+       ($scalar == 3 ? "ok $i - query_scalar" : "not ok $i - query_scalar got $scalar")
+
+my $one
+eval { $one = Postgres::query_one("SELECT * FROM $tbl WHERE name = \$1", dsn => $dsn, bind => ["alice"]) }
+$i++
+p $@ ? "not ok $i - query_one: $@" :
+       (defined $one && $one->{name} eq "alice" && $one->{payload}->{color} eq "blue"
+            ? "ok $i - query_one (jsonb decoded)"
+            : "not ok $i - query_one wrong")
+
+my @col
+eval { @col = Postgres::query_col("SELECT name FROM $tbl ORDER BY id", dsn => $dsn) }
+$i++
+p $@ ? "not ok $i - query_col: $@" :
+       (len(@col) == 3 && $col[0] eq "alice"
+            ? "ok $i - query_col"
+            : "not ok $i - query_col wrong")
+
+my $sch
+eval { $sch = Postgres::schema($tbl, dsn => $dsn) }
+$i++
+p $@ ? "not ok $i - schema: $@" :
+       (ref($sch->{columns}) eq "ARRAY" && len(@{$sch->{columns}}) == 4
+            ? "ok $i - schema (4 cols)"
+            : "not ok $i - schema bad shape")
+
+my @tables
+eval { @tables = Postgres::tables(dsn => $dsn) }
+$i++
+if ($@) {
+    p "not ok $i - tables: $@"
+} else {
+    my $found = 0
+    for my $t (@tables) {
+        $found = 1 if $t eq $tbl
+    }
+    p ($found ? "ok $i - tables (found $tbl)"
+              : "not ok $i - tables missing $tbl (saw " . len(@tables) . " total)")
+}
+
+my $r2
+eval {
+    $r2 = Postgres::insert_many($tbl,
+        [{ name => "dana", score => 4.0, payload => { color => "purple" } },
+         { name => "eve",  score => 5.5, payload => { color => "yellow" } }],
+        dsn => $dsn,
+    )
+}
+$i++
+p $@ ? "not ok $i - insert_many: $@" :
+       ($r2->{affected_rows} == 2 ? "ok $i - insert_many" : "not ok $i - insert_many wrong count")
+
+# RETURNING — verify generated IDs come back as rows.
+my @returned
+eval {
+    @returned = Postgres::insert_many($tbl,
+        [{ name => "frank", score => 6.0, payload => { color => "orange" } }],
+        dsn => $dsn,
+        returning => "id",
+    )
+}
+$i++
+p $@ ? "not ok $i - insert_many returning: $@" :
+       (len(@returned) == 1 && defined $returned[0]->{id}
+            ? "ok $i - insert_many returning id=$returned[0]->{id}"
+            : "not ok $i - insert_many returning wrong shape")
+
+eval { Postgres::execute("DROP TABLE $tbl", dsn => $dsn) }

@@ -1,0 +1,32 @@
+[package]
+name = "stryke-postgres-helper"
+version = "0.1.0"
+edition = "2021"
+description = "PostgreSQL bridge binary for the stryke `postgres` package."
+authors = ["MenkeTechnologies"]
+license = "MIT"
+repository = "https://github.com/MenkeTechnologies/stryke-postgres"
+publish = false
+
+[[bin]]
+name = "stryke-postgres-helper"
+path = "src/main.rs"
+
+[dependencies]
+postgres = { version = "0.19", features = ["with-serde_json-1", "with-uuid-1", "with-chrono-0_4"] }
+clap = { version = "4", default-features = false, features = [
+    "std", "derive", "help", "usage", "error-context", "env",
+] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+anyhow = "1"
+base64 = "0.22"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+uuid = "1"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true
+panic = "abort"

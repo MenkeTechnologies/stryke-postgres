@@ -1,0 +1,19 @@
+[package]
+name = "postgres"
+version = "0.1.0"
+description = "PostgreSQL client for stryke. Opt-in package tier; persistent connection daemon over a Unix socket plus single-shot mode."
+authors = ["MenkeTechnologies"]
+license = "MIT"
+repository = "https://github.com/MenkeTechnologies/stryke-postgres"
+edition = "2026"
+
+[bin]
+postgres = "bin/postgres.stk"
+postgres-build = "bin/postgres-build.stk"
+
+[scripts]
+build = "cargo build --release"
+build-debug = "cargo build"
+clean = "cargo clean"
+test = "s test t/"
+install = "s pkg install -g ."
