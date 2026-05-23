@@ -1,11 +1,46 @@
-# stryke-postgres
+```
+ ███████╗████████╗██████╗ ██╗   ██╗██╗  ██╗███████╗
+ ██╔════╝╚══██╔══╝██╔══██╗╚██╗ ██╔╝██║ ██╔╝██╔════╝
+ ███████╗   ██║   ██████╔╝ ╚████╔╝ █████╔╝ █████╗
+ ╚════██║   ██║   ██╔══██╗  ╚██╔╝  ██╔═██╗ ██╔══╝
+ ███████║   ██║   ██║  ██║   ██║   ██║  ██╗███████╗
+ ╚══════╝   ╚═╝   ╚═╝  ╚═╝   ╚═╝   ╚═╝  ╚═╝╚══════╝
+                   [ p o s t g r e s ]
+```
+
+[![CI](https://github.com/MenkeTechnologies/stryke-postgres/actions/workflows/ci.yml/badge.svg)](https://github.com/MenkeTechnologies/stryke-postgres/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![stryke](https://img.shields.io/badge/stryke-package-cyan.svg)](https://github.com/MenkeTechnologies/strykelang)
+
+### `[POSTGRESQL CLIENT FOR STRYKE // OPT-IN PACKAGE]`
+
+> *"Postgres without the ORM."*
 
 PostgreSQL client for stryke. Opt-in package, kept out of the stryke core
 binary so the daily-driver install stays slim.
 
-Created by MenkeTechnologies.
+### [`strykelang`](https://github.com/MenkeTechnologies/strykelang) &middot; [`MenkeTechnologiesMeta`](https://github.com/MenkeTechnologies/MenkeTechnologiesMeta) · [`stryke-mysql`](https://github.com/MenkeTechnologies/stryke-mysql) · [`stryke-mongo`](https://github.com/MenkeTechnologies/stryke-mongo) · [`stryke-duckdb`](https://github.com/MenkeTechnologies/stryke-duckdb) · [`stryke-demo`](https://github.com/MenkeTechnologies/stryke-demo)
 
-## Why this is a package, not a builtin
+---
+
+## Table of Contents
+
+- [\[0x00\] Why this is a package, not a builtin](#0x00-why-this-is-a-package-not-a-builtin)
+- [\[0x01\] Install](#0x01-install)
+- [\[0x02\] Quick start](#0x02-quick-start)
+- [\[0x03\] CLI: `postgres`](#0x03-cli-postgres)
+- [\[0x04\] API reference](#0x04-api-reference)
+- [\[0x05\] Helper protocol](#0x05-helper-protocol)
+- [\[0x06\] Type encoding](#0x06-type-encoding)
+- [\[0x07\] Bind parameters](#0x07-bind-parameters)
+- [\[0x08\] Tests](#0x08-tests)
+- [\[0x09\] Dev workflow](#0x09-dev-workflow)
+- [\[0x0A\] Layout](#0x0a-layout)
+- [\[0xFF\] License](#0xff-license)
+
+---
+
+## [0x00] Why this is a package, not a builtin
 
 Same rationale as [stryke-arrow](../stryke-arrow) and
 [stryke-mysql](../stryke-mysql): a real database client pulls in 100+
@@ -17,7 +52,7 @@ package.
 (`stryke-postgres-helper`) built from this repo. The stryke side spawns the
 helper per call and parses NDJSON over a pipe.
 
-## Install
+## [0x01] Install
 
 ```sh
 cd ~/projects/stryke-postgres
@@ -31,7 +66,7 @@ Or:
 make install
 ```
 
-## Quick start
+## [0x02] Quick start
 
 ```stryke
 use Postgres
@@ -77,7 +112,7 @@ DSN sources (priority order):
 2. `$ENV{POSTGRES_DSN}` (or `$ENV{DATABASE_URL}`)
 3. Individual flags: `host`, `port`, `user`, `password`, `database`
 
-## CLI: `postgres`
+## [0x03] CLI: `postgres`
 
 ```sh
 postgres query   'SELECT * FROM users WHERE id = $1' --bind='[42]'
@@ -106,7 +141,7 @@ Connection flags (also accept env vars):
 --connect-timeout SECONDS
 ```
 
-## API reference
+## [0x04] API reference
 
 ### Read paths
 
@@ -154,7 +189,7 @@ Postgres::ensure_built()  → $abs_path     # cargo-builds if missing
 Postgres::version()       → "stryke-postgres-helper 0.1.0"
 ```
 
-## Helper protocol
+## [0x05] Helper protocol
 
 ```sh
 stryke-postgres-helper --dsn 'postgres://…' query 'SELECT * FROM t WHERE id = $1' --bind '[42]'
@@ -184,7 +219,7 @@ JSON-RPC over a Unix socket: each line is `{"id":N,"method":"query|execute|ping|
 The connection is reused across requests. The stryke side's persistent-connect
 API will pick this up once stryke gains a Unix-socket client builtin.
 
-## Type encoding
+## [0x06] Type encoding
 
 PostgreSQL → JSON encoding:
 
@@ -207,7 +242,7 @@ PostgreSQL → JSON encoding:
 | other | string | falls back to text representation |
 | `NULL` | null | |
 
-## Bind parameters
+## [0x07] Bind parameters
 
 PostgreSQL placeholders are positional `$1`, `$2`, …  Pass binds as a JSON
 array (stryke side: an arrayref). Add explicit casts (`$1::int`, `$2::text`)
@@ -224,7 +259,7 @@ type expects (int2/int4/int8/float4/float8/numeric/text) so casts aren't
 strictly required for INSERT into a typed column — only for expressions
 where Postgres can't infer.
 
-## Tests
+## [0x08] Tests
 
 ```sh
 cargo test                                       # unit tests (scaffold)
@@ -234,7 +269,7 @@ POSTGRES_DSN='postgres://…' s test t/            # end-to-end against live Pos
 The end-to-end suite skips cleanly when `$POSTGRES_DSN` is unset or the
 helper isn't built.
 
-## Dev workflow
+## [0x09] Dev workflow
 
 ```sh
 make             # release build
@@ -244,7 +279,7 @@ make install     # release + pkg install -g .
 make clean
 ```
 
-## Layout
+## [0x0A] Layout
 
 ```
 stryke-postgres/
@@ -268,6 +303,6 @@ stryke-postgres/
     release.yml                  # cross-compile + GH release on tag push
 ```
 
-## License
+## [0xFF] License
 
 MIT.
