@@ -1361,6 +1361,56 @@ mod tests {
         let cfg = build_config(&cli).unwrap();
         assert!(!cfg.get_hosts().is_empty());
     }
+
+    #[test]
+    fn bindval_to_sql_null_yields_is_null() {
+        use postgres::types::{IsNull, ToSql, Type};
+        let v = BindVal::Null;
+        let mut out = postgres::types::private::BytesMut::new();
+        assert!(matches!(v.to_sql(&Type::TEXT, &mut out).unwrap(), IsNull::Yes));
+    }
+
+    #[test]
+    fn quote_ident_newline_in_name() {
+        assert_eq!(quote_ident("a\nb"), "\"a\nb\"");
+    }
+
+    #[test]
+    fn parse_bind_three_element_array() {
+        assert_eq!(parse_bind(Some("[1,2,3]")).unwrap().len(), 3);
+    }
+
+    #[test]
+    fn build_config_host_only_sets_tcp_host() {
+        use postgres::config::Host;
+        let mut cli = base_cli();
+        cli.host = Some("pg.internal".into());
+        match &build_config(&cli).unwrap().get_hosts()[0] {
+            Host::Tcp(h) => assert_eq!(h, "pg.internal"),
+            #[cfg(unix)]
+            Host::Unix(_) => panic!("expected Tcp"),
+        }
+    }
+
+    #[test]
+    fn bindval_from_json_string() {
+        assert!(matches!(BindVal::from_json(json!("text")), BindVal::Str(s) if s == "text"));
+    }
+
+    #[test]
+    fn bindval_to_sql_i64_as_oid() {
+        use postgres::types::{IsNull, ToSql, Type};
+        let v = BindVal::I64(42);
+        let mut out = postgres::types::private::BytesMut::new();
+        assert!(matches!(v.to_sql(&Type::OID, &mut out).unwrap(), IsNull::No));
+    }
+
+    #[test]
+    fn build_config_user_from_cli() {
+        let mut cli = base_cli();
+        cli.user = Some("app".into());
+        assert_eq!(build_config(&cli).unwrap().get_user(), Some("app"));
+    }
 }
 
 #[allow(dead_code)]
