@@ -995,6 +995,317 @@ mod tests {
         let s = serde_json::to_value(&r).unwrap();
         assert_eq!(s["id"], json!("req-123"));
     }
+
+    #[test]
+    fn bindval_from_json_negative_integer() {
+        assert!(matches!(BindVal::from_json(json!(-1)), BindVal::I64(-1)));
+    }
+
+    #[test]
+    fn bindval_from_json_large_u64_as_json_number() {
+        let big = json!(9_223_372_036_854_775_807u64);
+        assert!(matches!(BindVal::from_json(big), BindVal::I64(9_223_372_036_854_775_807)));
+    }
+
+    #[test]
+    fn parse_bind_empty_array() {
+        let v = parse_bind(Some("[]")).unwrap();
+        assert!(v.is_empty());
+    }
+
+    #[test]
+    fn quote_ident_empty_string() {
+        assert_eq!(quote_ident(""), "\"\"");
+    }
+
+    #[test]
+    fn parse_bind_string_null_not_treated_as_empty() {
+        // Only exact "null" token (JSON null) maps to empty — a string "null" binds.
+        let v = parse_bind(Some(r#""null""#)).unwrap_err();
+        assert!(format!("{v}").to_lowercase().contains("array"));
+    }
+
+    #[test]
+    fn bind_refs_preserves_order() {
+        let binds = vec![
+            BindVal::I64(1),
+            BindVal::Str("a".into()),
+            BindVal::Bool(true),
+        ];
+        assert_eq!(bind_refs(&binds).len(), 3);
+    }
+
+    #[test]
+    fn bindval_from_json_empty_string() {
+        match BindVal::from_json(json!("")) {
+            BindVal::Str(s) => assert!(s.is_empty()),
+            other => panic!("expected Str, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bindval_from_json_object_stays_json_variant() {
+        let v = json!({"nested": [1, 2]});
+        match BindVal::from_json(v.clone()) {
+            BindVal::Json(j) => assert_eq!(j, v),
+            other => panic!("expected Json, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_bind_array_with_float() {
+        let v = parse_bind(Some("[1.5, 2.5]")).unwrap();
+        assert_eq!(v.len(), 2);
+        assert!(matches!(v[0], BindVal::F64(f) if f == 1.5));
+    }
+
+    #[test]
+    fn err_resp_null_id() {
+        let r = err_resp(&Value::Null, "err".into());
+        let s = serde_json::to_value(&r).unwrap();
+        assert_eq!(s["id"], Value::Null);
+        assert_eq!(s["ok"], json!(false));
+    }
+
+    #[test]
+    fn quote_ident_sql_keyword_preserved() {
+        assert_eq!(quote_ident("select"), "\"select\"");
+    }
+
+    #[test]
+    fn bindval_to_sql_null_is_null() {
+        use postgres::types::{IsNull, ToSql, Type};
+        let v = BindVal::Null;
+        let mut out = postgres::types::private::BytesMut::new();
+        assert!(matches!(
+            v.to_sql(&Type::TEXT, &mut out).unwrap(),
+            IsNull::Yes
+        ));
+    }
+
+    #[test]
+    fn bindval_to_sql_i64_as_int4() {
+        use postgres::types::{IsNull, ToSql, Type};
+        let v = BindVal::I64(7);
+        let mut out = postgres::types::private::BytesMut::new();
+        assert!(matches!(
+            v.to_sql(&Type::INT4, &mut out).unwrap(),
+            IsNull::No
+        ));
+        assert!(!out.is_empty());
+    }
+
+    #[test]
+    fn bindval_to_sql_str_as_text() {
+        use postgres::types::{IsNull, ToSql, Type};
+        let v = BindVal::Str("hello".into());
+        let mut out = postgres::types::private::BytesMut::new();
+        assert!(matches!(
+            v.to_sql(&Type::TEXT, &mut out).unwrap(),
+            IsNull::No
+        ));
+    }
+
+    fn base_cli() -> Cli {
+        Cli {
+            dsn: None,
+            database_url: None,
+            host: None,
+            port: None,
+            user: None,
+            password: None,
+            database: None,
+            connect_timeout: 10,
+            application_name: "test".into(),
+            cmd: Cmd::Ping,
+        }
+    }
+
+    #[test]
+    fn build_config_defaults_host_localhost() {
+        let cfg = build_config(&base_cli()).unwrap();
+        assert!(!cfg.get_hosts().is_empty());
+    }
+
+    #[test]
+    fn build_config_dsn_overrides_host() {
+        let mut cli = base_cli();
+        cli.dsn = Some("postgres://u:p@db.example.com:5433/mydb".into());
+        let cfg = build_config(&cli).unwrap();
+        let hosts = cfg.get_hosts();
+        assert!(!hosts.is_empty());
+    }
+
+    #[test]
+    fn build_config_explicit_host_port() {
+        use postgres::config::Host;
+        let mut cli = base_cli();
+        cli.host = Some("pg.local".into());
+        cli.port = Some(5433);
+        let cfg = build_config(&cli).unwrap();
+        match &cfg.get_hosts()[0] {
+            Host::Tcp(h) => assert_eq!(h, "pg.local"),
+            #[cfg(unix)]
+            Host::Unix(_) => panic!("expected Tcp host"),
+        }
+        assert_eq!(cfg.get_ports(), &[5433]);
+    }
+
+    #[test]
+    fn bindval_to_sql_bool_as_bool() {
+        use postgres::types::{IsNull, ToSql, Type};
+        let v = BindVal::Bool(true);
+        let mut out = postgres::types::private::BytesMut::new();
+        assert!(matches!(v.to_sql(&Type::BOOL, &mut out).unwrap(), IsNull::No));
+    }
+
+    #[test]
+    fn bindval_to_sql_f64_as_float8() {
+        use postgres::types::{IsNull, ToSql, Type};
+        let v = BindVal::F64(2.5);
+        let mut out = postgres::types::private::BytesMut::new();
+        assert!(matches!(v.to_sql(&Type::FLOAT8, &mut out).unwrap(), IsNull::No));
+    }
+
+    #[test]
+    fn bindval_to_sql_i64_as_int2() {
+        use postgres::types::{IsNull, ToSql, Type};
+        let v = BindVal::I64(9);
+        let mut out = postgres::types::private::BytesMut::new();
+        assert!(matches!(v.to_sql(&Type::INT2, &mut out).unwrap(), IsNull::No));
+    }
+
+    #[test]
+    fn bindval_from_json_u64_fits_i64() {
+        assert!(matches!(BindVal::from_json(json!(100)), BindVal::I64(100)));
+    }
+
+    #[test]
+    fn parse_bind_array_with_bool_and_null() {
+        let v = parse_bind(Some("[true, null]")).unwrap();
+        assert_eq!(v.len(), 2);
+        assert!(matches!(v[0], BindVal::Bool(true)));
+        assert!(matches!(v[1], BindVal::Null));
+    }
+
+    #[test]
+    fn build_config_application_name_preserved() {
+        let mut cli = base_cli();
+        cli.application_name = "etl-worker".into();
+        let cfg = build_config(&cli).unwrap();
+        assert_eq!(cfg.get_application_name(), Some("etl-worker"));
+    }
+
+    #[test]
+    fn bindval_to_sql_f64_as_numeric() {
+        use postgres::types::{IsNull, ToSql, Type};
+        let v = BindVal::F64(3.14);
+        let mut out = postgres::types::private::BytesMut::new();
+        assert!(matches!(v.to_sql(&Type::NUMERIC, &mut out).unwrap(), IsNull::No));
+    }
+
+    #[test]
+    fn bindval_from_json_negative_one() {
+        assert!(matches!(BindVal::from_json(json!(-1)), BindVal::I64(-1)));
+    }
+
+    #[test]
+    fn quote_ident_multiple_embedded_quotes() {
+        assert_eq!(quote_ident("a\"b\"c"), "\"a\"\"b\"\"c\"");
+    }
+
+    #[test]
+    fn build_config_connect_timeout_seconds() {
+        let mut cli = base_cli();
+        cli.connect_timeout = 42;
+        let cfg = build_config(&cli).unwrap();
+        assert_eq!(
+            cfg.get_connect_timeout(),
+            Some(&std::time::Duration::from_secs(42)),
+        );
+    }
+
+    #[test]
+    fn build_config_password_sets_user_default() {
+        let mut cli = base_cli();
+        cli.password = Some("secret".into());
+        let cfg = build_config(&cli).unwrap();
+        assert!(cfg.get_password().is_some());
+    }
+
+    #[test]
+    fn bindval_to_sql_null_as_text() {
+        use postgres::types::{IsNull, ToSql, Type};
+        let v = BindVal::Null;
+        let mut out = postgres::types::private::BytesMut::new();
+        assert!(matches!(v.to_sql(&Type::TEXT, &mut out).unwrap(), IsNull::Yes));
+    }
+
+    #[test]
+    fn bindval_from_json_empty_array_json_variant() {
+        match BindVal::from_json(json!([])) {
+            BindVal::Json(v) => assert_eq!(v, json!([])),
+            other => panic!("expected Json, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bindval_to_sql_bool_false() {
+        use postgres::types::{IsNull, ToSql, Type};
+        let v = BindVal::Bool(false);
+        let mut out = postgres::types::private::BytesMut::new();
+        assert!(matches!(v.to_sql(&Type::BOOL, &mut out).unwrap(), IsNull::No));
+    }
+
+    #[test]
+    fn bindval_from_json_f64() {
+        match BindVal::from_json(json!(2.5)) {
+            BindVal::F64(f) => assert_eq!(f, 2.5),
+            other => panic!("expected F64, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn quote_ident_unicode() {
+        assert_eq!(quote_ident("列"), "\"列\"");
+    }
+
+    #[test]
+    fn parse_bind_single_element_array() {
+        let v = parse_bind(Some("[42]")).unwrap();
+        assert_eq!(v.len(), 1);
+        assert!(matches!(v[0], BindVal::I64(42)));
+    }
+
+    #[test]
+    fn build_config_database_name() {
+        let mut cli = base_cli();
+        cli.database = Some("analytics".into());
+        assert_eq!(build_config(&cli).unwrap().get_dbname(), Some("analytics"));
+    }
+
+    #[test]
+    fn bindval_to_sql_str_as_varchar() {
+        use postgres::types::{IsNull, ToSql, Type};
+        let v = BindVal::Str("x".into());
+        let mut out = postgres::types::private::BytesMut::new();
+        assert!(matches!(v.to_sql(&Type::VARCHAR, &mut out).unwrap(), IsNull::No));
+    }
+
+    #[test]
+    fn bindval_from_json_object_nested() {
+        match BindVal::from_json(json!({"a": {"b": 1}})) {
+            BindVal::Json(v) => assert_eq!(v["a"]["b"], json!(1)),
+            other => panic!("expected Json, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn build_config_user_override() {
+        let mut cli = base_cli();
+        cli.user = Some("dbuser".into());
+        assert_eq!(build_config(&cli).unwrap().get_user(), Some("dbuser"));
+    }
 }
 
 #[allow(dead_code)]
