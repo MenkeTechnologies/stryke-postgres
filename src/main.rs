@@ -1306,6 +1306,61 @@ mod tests {
         cli.user = Some("dbuser".into());
         assert_eq!(build_config(&cli).unwrap().get_user(), Some("dbuser"));
     }
+
+    #[test]
+    fn bindval_to_sql_i64_as_int8() {
+        use postgres::types::{IsNull, ToSql, Type};
+        let v = BindVal::I64(127);
+        let mut out = postgres::types::private::BytesMut::new();
+        assert!(matches!(v.to_sql(&Type::INT8, &mut out).unwrap(), IsNull::No));
+    }
+
+    #[test]
+    fn bindval_from_json_bool_true() {
+        assert!(matches!(BindVal::from_json(json!(true)), BindVal::Bool(true)));
+    }
+
+    #[test]
+    fn quote_ident_semicolon_in_name() {
+        assert_eq!(quote_ident("a;b"), "\"a;b\"");
+    }
+
+    #[test]
+    fn parse_bind_two_element_array() {
+        let v = parse_bind(Some("[1,2]")).unwrap();
+        assert_eq!(v.len(), 2);
+    }
+
+    #[test]
+    fn build_config_password_in_config() {
+        let mut cli = base_cli();
+        cli.password = Some("pw".into());
+        assert!(build_config(&cli).unwrap().get_password().is_some());
+    }
+
+    #[test]
+    fn bindval_from_json_large_i64() {
+        assert!(matches!(
+            BindVal::from_json(json!(9_223_372_036_854_775_807i64)),
+            BindVal::I64(9_223_372_036_854_775_807),
+        ));
+    }
+
+    #[test]
+    fn bindval_to_sql_str_empty_as_text() {
+        use postgres::types::{IsNull, ToSql, Type};
+        let v = BindVal::Str(String::new());
+        let mut out = postgres::types::private::BytesMut::new();
+        assert!(matches!(v.to_sql(&Type::TEXT, &mut out).unwrap(), IsNull::No));
+    }
+
+    #[test]
+    fn build_config_dsn_sets_host() {
+        let mut cli = base_cli();
+        cli.dsn = Some("postgres://u@db.example.com:5432/mydb".into());
+        let cfg = build_config(&cli).unwrap();
+        assert!(!cfg.get_hosts().is_empty());
+    }
 }
 
 #[allow(dead_code)]
