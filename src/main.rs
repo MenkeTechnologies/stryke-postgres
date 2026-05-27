@@ -849,6 +849,154 @@ fn _force_chrono_link() -> Option<NaiveDateTime> {
     None
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ─── parse_bind ──────────────────────────────────────────────────
+
+    #[test]
+    fn parse_bind_none_empty() {
+        assert!(parse_bind(None).unwrap().is_empty());
+    }
+
+    #[test]
+    fn parse_bind_blank_string_empty() {
+        assert!(parse_bind(Some("")).unwrap().is_empty());
+        assert!(parse_bind(Some("   ")).unwrap().is_empty());
+    }
+
+    #[test]
+    fn parse_bind_null_treated_as_empty() {
+        assert!(parse_bind(Some("null")).unwrap().is_empty());
+    }
+
+    #[test]
+    fn parse_bind_array_of_scalars() {
+        let v = parse_bind(Some(r#"[1, "two", true, null, 3.5]"#)).unwrap();
+        assert_eq!(v.len(), 5);
+        assert!(matches!(v[0], BindVal::I64(1)));
+        assert!(matches!(v[1], BindVal::Str(ref s) if s == "two"));
+        assert!(matches!(v[2], BindVal::Bool(true)));
+        assert!(matches!(v[3], BindVal::Null));
+        match &v[4] {
+            BindVal::F64(f) => assert_eq!(*f, 3.5),
+            other => panic!("expected F64, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_bind_object_rejected_postgres_is_positional() {
+        let err = parse_bind(Some(r#"{"a":1}"#)).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("array"));
+        assert!(msg.contains("positional"));
+    }
+
+    #[test]
+    fn parse_bind_invalid_json_errors() {
+        let err = parse_bind(Some("{bad json}")).unwrap_err();
+        assert!(format!("{err}").to_lowercase().contains("parsing"));
+    }
+
+    // ─── BindVal::from_json ──────────────────────────────────────────
+
+    #[test]
+    fn bindval_from_json_null() {
+        assert!(matches!(BindVal::from_json(Value::Null), BindVal::Null));
+    }
+
+    #[test]
+    fn bindval_from_json_bool() {
+        assert!(matches!(BindVal::from_json(json!(true)), BindVal::Bool(true)));
+    }
+
+    #[test]
+    fn bindval_from_json_integer_is_i64() {
+        assert!(matches!(BindVal::from_json(json!(42)), BindVal::I64(42)));
+        assert!(matches!(BindVal::from_json(json!(-5)), BindVal::I64(-5)));
+    }
+
+    #[test]
+    fn bindval_from_json_float_is_f64() {
+        match BindVal::from_json(json!(2.5)) {
+            BindVal::F64(f) => assert_eq!(f, 2.5),
+            other => panic!("expected F64, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bindval_from_json_string_is_str() {
+        match BindVal::from_json(json!("hi")) {
+            BindVal::Str(s) => assert_eq!(s, "hi"),
+            other => panic!("expected Str, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bindval_from_json_array_is_json() {
+        match BindVal::from_json(json!([1, 2, 3])) {
+            BindVal::Json(v) => assert_eq!(v, json!([1, 2, 3])),
+            other => panic!("expected Json, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bindval_from_json_object_is_json() {
+        match BindVal::from_json(json!({"k": 1})) {
+            BindVal::Json(v) => assert_eq!(v, json!({"k": 1})),
+            other => panic!("expected Json, got {other:?}"),
+        }
+    }
+
+    // ─── bind_refs ───────────────────────────────────────────────────
+
+    #[test]
+    fn bind_refs_count_matches_input() {
+        let v = vec![BindVal::I64(1), BindVal::Null, BindVal::Str("x".into())];
+        assert_eq!(bind_refs(&v).len(), 3);
+    }
+
+    // ─── quote_ident ─────────────────────────────────────────────────
+
+    #[test]
+    fn quote_ident_wraps_in_double_quotes() {
+        assert_eq!(quote_ident("users"), "\"users\"");
+    }
+
+    #[test]
+    fn quote_ident_doubles_internal_double_quotes() {
+        // SQL standard identifier escaping: " → ""
+        assert_eq!(quote_ident("a\"b"), "\"a\"\"b\"");
+    }
+
+    #[test]
+    fn quote_ident_preserves_dots_spaces_unicode() {
+        assert_eq!(quote_ident("my.schema"), "\"my.schema\"");
+        assert_eq!(quote_ident("with space"), "\"with space\"");
+        assert_eq!(quote_ident("日本語"), "\"日本語\"");
+    }
+
+    // ─── err_resp ────────────────────────────────────────────────────
+
+    #[test]
+    fn err_resp_marks_failure_and_carries_id_and_msg() {
+        let r = err_resp(&json!(7), "boom".into());
+        let s = serde_json::to_value(&r).unwrap();
+        assert_eq!(s["id"], json!(7));
+        assert_eq!(s["ok"], json!(false));
+        assert_eq!(s["error"], json!("boom"));
+        assert!(!s.as_object().unwrap().contains_key("result"));
+    }
+
+    #[test]
+    fn err_resp_with_string_id_round_trips() {
+        let r = err_resp(&json!("req-123"), "fail".into());
+        let s = serde_json::to_value(&r).unwrap();
+        assert_eq!(s["id"], json!("req-123"));
+    }
+}
+
 #[allow(dead_code)]
 fn _force_hashmap_link() -> HashMap<(), ()> {
     HashMap::new()
