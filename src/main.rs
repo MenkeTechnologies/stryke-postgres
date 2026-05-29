@@ -1552,4 +1552,102 @@ mod tests {
             "expected `parsing --bind JSON` in chain; got {chain:?}"
         );
     }
+
+    // ─── clap parsing — Cli top-level + Cmd routing ─────────────────────
+    // Pin the CLI surface: subcommand routing, default schema flag,
+    // required positionals. Drift would silently change which SQL is
+    // sent on the wire.
+    //
+    // `Cli` only derives `Parser` (no Debug), so we destructure errors
+    // through `match` instead of `unwrap_err`.
+
+    fn parse_cli(args: &[&str]) -> Result<Cli, clap::Error> {
+        let mut argv = vec!["stryke-postgres-helper"];
+        argv.extend_from_slice(args);
+        Cli::try_parse_from(argv)
+    }
+
+    fn assert_missing_required(res: Result<Cli, clap::Error>) {
+        match res {
+            Err(e) => assert_eq!(e.kind(), clap::error::ErrorKind::MissingRequiredArgument),
+            Ok(_) => panic!("expected MissingRequiredArgument, got Ok"),
+        }
+    }
+
+    /// Cli has no Debug derive, so unwrap_err / expect-on-ok don't work.
+    /// Pull the Cli out via match, panicking on Err (which carries clap's
+    /// own Debug impl through Error::to_string).
+    fn unwrap_cli(res: Result<Cli, clap::Error>) -> Cli {
+        match res {
+            Ok(c) => c,
+            Err(e) => panic!("expected parse Ok, got Err: {e}"),
+        }
+    }
+
+    #[test]
+    fn cli_ping_unit_variant() {
+        let cli = unwrap_cli(parse_cli(&["ping"]));
+        assert!(matches!(cli.cmd, Cmd::Ping));
+    }
+
+    #[test]
+    fn cli_query_requires_sql_positional() {
+        assert_missing_required(parse_cli(&["query"]));
+    }
+
+    #[test]
+    fn cli_tables_schema_optional_defaults_none() {
+        // Pin: bare `tables` defers to PG's current_schema() (docstring
+        // contract). A drift to a literal default like "public" would
+        // change which tables list under custom search_paths.
+        let cli = unwrap_cli(parse_cli(&["tables"]));
+        match cli.cmd {
+            Cmd::Tables { schema } => assert!(schema.is_none()),
+            _ => panic!("expected Tables"),
+        }
+    }
+
+    #[test]
+    fn cli_dump_table_flag_required() {
+        // --table is the SELECT target; without it the shorthand has
+        // nothing to scan.
+        assert_missing_required(parse_cli(&["dump"]));
+    }
+
+    #[test]
+    fn cli_schema_table_required_and_schema_optional() {
+        // --table is required (the inspect target); --schema is
+        // optional (defers to current_schema()).
+        assert_missing_required(parse_cli(&["schema"]));
+        let cli = unwrap_cli(parse_cli(&["schema", "--table", "users"]));
+        match cli.cmd {
+            Cmd::Schema { table, schema } => {
+                assert_eq!(table, "users");
+                assert!(schema.is_none());
+            }
+            _ => panic!("expected Schema"),
+        }
+    }
+
+    #[test]
+    fn cli_serve_requires_socket_path() {
+        assert_missing_required(parse_cli(&["serve"]));
+    }
+
+    #[test]
+    fn cli_query_columnar_and_with_meta_default_false() {
+        // Pin: streaming NDJSON is the default; --columnar/--with-meta opt-in.
+        let cli = unwrap_cli(parse_cli(&["query", "SELECT 1"]));
+        match &cli.cmd {
+            Cmd::Query {
+                columnar,
+                with_meta,
+                ..
+            } => {
+                assert!(!columnar);
+                assert!(!with_meta);
+            }
+            _ => panic!("expected Query"),
+        }
+    }
 }
