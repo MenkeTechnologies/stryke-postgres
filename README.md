@@ -186,7 +186,7 @@ Postgres::schema     $table, %opts → { table, schema, columns => [...], indexe
 ```stryke
 Postgres::helper_path()   → $abs_path
 Postgres::ensure_built()  → $abs_path     # cargo-builds if missing
-Postgres::version()       → "stryke-postgres-helper 0.1.0"
+Postgres::version()       → "stryke-postgres-helper 0.1.1"
 ```
 
 ## [0x05] Helper protocol
