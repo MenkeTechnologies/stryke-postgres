@@ -1518,4 +1518,38 @@ mod tests {
         cli.user = Some("app".into());
         assert_eq!(build_config(&cli).unwrap().get_user(), Some("app"));
     }
+
+    // ─── parse_bind error-shape pins ─────────────────────────────────
+    //
+    // Postgres `$1, $2, …` is strictly positional; the rejection
+    // message must say so explicitly so users coming from MySQL /
+    // SQLite get a clear hint rather than a generic JSON error.
+
+    #[test]
+    fn parse_bind_object_error_mentions_positional() {
+        let err = parse_bind(Some("{\"x\":1}")).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("positional"),
+            "Postgres-only restriction must be called out explicitly; got: {msg}"
+        );
+        assert!(msg.contains("$1"));
+    }
+
+    #[test]
+    fn parse_bind_scalar_error_same_message() {
+        let err = parse_bind(Some("42")).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("positional"));
+    }
+
+    #[test]
+    fn parse_bind_invalid_json_surfaces_context() {
+        let err = parse_bind(Some("[1,")).unwrap_err();
+        let chain: Vec<_> = err.chain().map(|c| c.to_string()).collect();
+        assert!(
+            chain.iter().any(|s| s.contains("parsing --bind JSON")),
+            "expected `parsing --bind JSON` in chain; got {chain:?}"
+        );
+    }
 }
