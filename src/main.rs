@@ -167,7 +167,14 @@ fn run(cli: &Cli) -> Result<()> {
             limit,
         } => {
             let mut client = connect(cli)?;
-            cmd_query(&mut client, sql, bind.as_deref(), *columnar, *with_meta, *limit)
+            cmd_query(
+                &mut client,
+                sql,
+                bind.as_deref(),
+                *columnar,
+                *with_meta,
+                *limit,
+            )
         }
         Cmd::Execute { sql, bind } => {
             let mut client = connect(cli)?;
@@ -392,7 +399,7 @@ fn parse_bind(s: Option<&str>) -> Result<Vec<BindVal>> {
     }
 }
 
-fn bind_refs<'a>(b: &'a [BindVal]) -> Vec<&'a (dyn ToSql + Sync)> {
+fn bind_refs(b: &[BindVal]) -> Vec<&(dyn ToSql + Sync)> {
     b.iter().map(|v| v as &(dyn ToSql + Sync)).collect()
 }
 
@@ -412,37 +419,93 @@ fn pgval_to_json(row: &Row, idx: usize) -> Value {
     let col = &row.columns()[idx];
     let ty = col.type_();
     match *ty {
-        Type::BOOL => row.try_get::<_, Option<bool>>(idx).ok().flatten()
-            .map(|v| json!(v)).unwrap_or(Value::Null),
-        Type::INT2 => row.try_get::<_, Option<i16>>(idx).ok().flatten()
-            .map(|v| json!(v)).unwrap_or(Value::Null),
-        Type::INT4 => row.try_get::<_, Option<i32>>(idx).ok().flatten()
-            .map(|v| json!(v)).unwrap_or(Value::Null),
-        Type::INT8 => row.try_get::<_, Option<i64>>(idx).ok().flatten()
-            .map(|v| json!(v)).unwrap_or(Value::Null),
-        Type::OID => row.try_get::<_, Option<u32>>(idx).ok().flatten()
-            .map(|v| json!(v)).unwrap_or(Value::Null),
-        Type::FLOAT4 => row.try_get::<_, Option<f32>>(idx).ok().flatten()
-            .map(|v| json!(v)).unwrap_or(Value::Null),
-        Type::FLOAT8 => row.try_get::<_, Option<f64>>(idx).ok().flatten()
-            .map(|v| json!(v)).unwrap_or(Value::Null),
-        Type::TEXT | Type::VARCHAR | Type::BPCHAR | Type::NAME | Type::CHAR
-            => row.try_get::<_, Option<String>>(idx).ok().flatten()
-                .map(|v| json!(v)).unwrap_or(Value::Null),
-        Type::JSON | Type::JSONB => row.try_get::<_, Option<Value>>(idx).ok().flatten()
+        Type::BOOL => row
+            .try_get::<_, Option<bool>>(idx)
+            .ok()
+            .flatten()
+            .map(|v| json!(v))
             .unwrap_or(Value::Null),
-        Type::UUID => row.try_get::<_, Option<Uuid>>(idx).ok().flatten()
-            .map(|v| json!(v.to_string())).unwrap_or(Value::Null),
-        Type::DATE => row.try_get::<_, Option<NaiveDate>>(idx).ok().flatten()
-            .map(|v| json!(v.format("%Y-%m-%d").to_string())).unwrap_or(Value::Null),
-        Type::TIME => row.try_get::<_, Option<NaiveTime>>(idx).ok().flatten()
-            .map(|v| json!(v.format("%H:%M:%S%.6f").to_string())).unwrap_or(Value::Null),
-        Type::TIMESTAMP => row.try_get::<_, Option<NaiveDateTime>>(idx).ok().flatten()
+        Type::INT2 => row
+            .try_get::<_, Option<i16>>(idx)
+            .ok()
+            .flatten()
+            .map(|v| json!(v))
+            .unwrap_or(Value::Null),
+        Type::INT4 => row
+            .try_get::<_, Option<i32>>(idx)
+            .ok()
+            .flatten()
+            .map(|v| json!(v))
+            .unwrap_or(Value::Null),
+        Type::INT8 => row
+            .try_get::<_, Option<i64>>(idx)
+            .ok()
+            .flatten()
+            .map(|v| json!(v))
+            .unwrap_or(Value::Null),
+        Type::OID => row
+            .try_get::<_, Option<u32>>(idx)
+            .ok()
+            .flatten()
+            .map(|v| json!(v))
+            .unwrap_or(Value::Null),
+        Type::FLOAT4 => row
+            .try_get::<_, Option<f32>>(idx)
+            .ok()
+            .flatten()
+            .map(|v| json!(v))
+            .unwrap_or(Value::Null),
+        Type::FLOAT8 => row
+            .try_get::<_, Option<f64>>(idx)
+            .ok()
+            .flatten()
+            .map(|v| json!(v))
+            .unwrap_or(Value::Null),
+        Type::TEXT | Type::VARCHAR | Type::BPCHAR | Type::NAME | Type::CHAR => row
+            .try_get::<_, Option<String>>(idx)
+            .ok()
+            .flatten()
+            .map(|v| json!(v))
+            .unwrap_or(Value::Null),
+        Type::JSON | Type::JSONB => row
+            .try_get::<_, Option<Value>>(idx)
+            .ok()
+            .flatten()
+            .unwrap_or(Value::Null),
+        Type::UUID => row
+            .try_get::<_, Option<Uuid>>(idx)
+            .ok()
+            .flatten()
+            .map(|v| json!(v.to_string()))
+            .unwrap_or(Value::Null),
+        Type::DATE => row
+            .try_get::<_, Option<NaiveDate>>(idx)
+            .ok()
+            .flatten()
+            .map(|v| json!(v.format("%Y-%m-%d").to_string()))
+            .unwrap_or(Value::Null),
+        Type::TIME => row
+            .try_get::<_, Option<NaiveTime>>(idx)
+            .ok()
+            .flatten()
+            .map(|v| json!(v.format("%H:%M:%S%.6f").to_string()))
+            .unwrap_or(Value::Null),
+        Type::TIMESTAMP => row
+            .try_get::<_, Option<NaiveDateTime>>(idx)
+            .ok()
+            .flatten()
             .map(|v| json!(v.format("%Y-%m-%d %H:%M:%S%.6f").to_string()))
             .unwrap_or(Value::Null),
-        Type::TIMESTAMPTZ => row.try_get::<_, Option<DateTime<Utc>>>(idx).ok().flatten()
-            .map(|v| json!(v.to_rfc3339())).unwrap_or(Value::Null),
-        Type::BYTEA => row.try_get::<_, Option<Vec<u8>>>(idx).ok().flatten()
+        Type::TIMESTAMPTZ => row
+            .try_get::<_, Option<DateTime<Utc>>>(idx)
+            .ok()
+            .flatten()
+            .map(|v| json!(v.to_rfc3339()))
+            .unwrap_or(Value::Null),
+        Type::BYTEA => row
+            .try_get::<_, Option<Vec<u8>>>(idx)
+            .ok()
+            .flatten()
             .map(|v| {
                 let mut s = String::from("base64:");
                 s.push_str(&B64.encode(&v));
@@ -564,13 +627,10 @@ fn exec_execute(client: &mut Client, sql: &str, bind: Option<&str>) -> Result<Ex
 }
 
 fn cmd_exec_file(client: &mut Client, file: &PathBuf) -> Result<()> {
-    let raw = fs::read_to_string(file)
-        .with_context(|| format!("reading {}", file.display()))?;
+    let raw = fs::read_to_string(file).with_context(|| format!("reading {}", file.display()))?;
     // simple_query handles `;`-separated multi-statement scripts in one shot
     // without prepared-statement support — exactly what we want for migrations.
-    let results = client
-        .simple_query(&raw)
-        .context("simple_query")?;
+    let results = client.simple_query(&raw).context("simple_query")?;
     let mut counts: Vec<Value> = Vec::new();
     for msg in &results {
         match msg {
@@ -849,6 +909,11 @@ fn _force_chrono_link() -> Option<NaiveDateTime> {
     None
 }
 
+#[allow(dead_code)]
+fn _force_hashmap_link() -> HashMap<(), ()> {
+    HashMap::new()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -908,7 +973,10 @@ mod tests {
 
     #[test]
     fn bindval_from_json_bool() {
-        assert!(matches!(BindVal::from_json(json!(true)), BindVal::Bool(true)));
+        assert!(matches!(
+            BindVal::from_json(json!(true)),
+            BindVal::Bool(true)
+        ));
     }
 
     #[test]
@@ -1004,7 +1072,10 @@ mod tests {
     #[test]
     fn bindval_from_json_large_u64_as_json_number() {
         let big = json!(9_223_372_036_854_775_807u64);
-        assert!(matches!(BindVal::from_json(big), BindVal::I64(9_223_372_036_854_775_807)));
+        assert!(matches!(
+            BindVal::from_json(big),
+            BindVal::I64(9_223_372_036_854_775_807)
+        ));
     }
 
     #[test]
@@ -1156,7 +1227,10 @@ mod tests {
         use postgres::types::{IsNull, ToSql, Type};
         let v = BindVal::Bool(true);
         let mut out = postgres::types::private::BytesMut::new();
-        assert!(matches!(v.to_sql(&Type::BOOL, &mut out).unwrap(), IsNull::No));
+        assert!(matches!(
+            v.to_sql(&Type::BOOL, &mut out).unwrap(),
+            IsNull::No
+        ));
     }
 
     #[test]
@@ -1164,7 +1238,10 @@ mod tests {
         use postgres::types::{IsNull, ToSql, Type};
         let v = BindVal::F64(2.5);
         let mut out = postgres::types::private::BytesMut::new();
-        assert!(matches!(v.to_sql(&Type::FLOAT8, &mut out).unwrap(), IsNull::No));
+        assert!(matches!(
+            v.to_sql(&Type::FLOAT8, &mut out).unwrap(),
+            IsNull::No
+        ));
     }
 
     #[test]
@@ -1172,7 +1249,10 @@ mod tests {
         use postgres::types::{IsNull, ToSql, Type};
         let v = BindVal::I64(9);
         let mut out = postgres::types::private::BytesMut::new();
-        assert!(matches!(v.to_sql(&Type::INT2, &mut out).unwrap(), IsNull::No));
+        assert!(matches!(
+            v.to_sql(&Type::INT2, &mut out).unwrap(),
+            IsNull::No
+        ));
     }
 
     #[test]
@@ -1199,9 +1279,12 @@ mod tests {
     #[test]
     fn bindval_to_sql_f64_as_numeric() {
         use postgres::types::{IsNull, ToSql, Type};
-        let v = BindVal::F64(3.14);
+        let v = BindVal::F64(3.5_f64);
         let mut out = postgres::types::private::BytesMut::new();
-        assert!(matches!(v.to_sql(&Type::NUMERIC, &mut out).unwrap(), IsNull::No));
+        assert!(matches!(
+            v.to_sql(&Type::NUMERIC, &mut out).unwrap(),
+            IsNull::No
+        ));
     }
 
     #[test]
@@ -1238,7 +1321,10 @@ mod tests {
         use postgres::types::{IsNull, ToSql, Type};
         let v = BindVal::Null;
         let mut out = postgres::types::private::BytesMut::new();
-        assert!(matches!(v.to_sql(&Type::TEXT, &mut out).unwrap(), IsNull::Yes));
+        assert!(matches!(
+            v.to_sql(&Type::TEXT, &mut out).unwrap(),
+            IsNull::Yes
+        ));
     }
 
     #[test]
@@ -1254,7 +1340,10 @@ mod tests {
         use postgres::types::{IsNull, ToSql, Type};
         let v = BindVal::Bool(false);
         let mut out = postgres::types::private::BytesMut::new();
-        assert!(matches!(v.to_sql(&Type::BOOL, &mut out).unwrap(), IsNull::No));
+        assert!(matches!(
+            v.to_sql(&Type::BOOL, &mut out).unwrap(),
+            IsNull::No
+        ));
     }
 
     #[test]
@@ -1289,7 +1378,10 @@ mod tests {
         use postgres::types::{IsNull, ToSql, Type};
         let v = BindVal::Str("x".into());
         let mut out = postgres::types::private::BytesMut::new();
-        assert!(matches!(v.to_sql(&Type::VARCHAR, &mut out).unwrap(), IsNull::No));
+        assert!(matches!(
+            v.to_sql(&Type::VARCHAR, &mut out).unwrap(),
+            IsNull::No
+        ));
     }
 
     #[test]
@@ -1312,12 +1404,18 @@ mod tests {
         use postgres::types::{IsNull, ToSql, Type};
         let v = BindVal::I64(127);
         let mut out = postgres::types::private::BytesMut::new();
-        assert!(matches!(v.to_sql(&Type::INT8, &mut out).unwrap(), IsNull::No));
+        assert!(matches!(
+            v.to_sql(&Type::INT8, &mut out).unwrap(),
+            IsNull::No
+        ));
     }
 
     #[test]
     fn bindval_from_json_bool_true() {
-        assert!(matches!(BindVal::from_json(json!(true)), BindVal::Bool(true)));
+        assert!(matches!(
+            BindVal::from_json(json!(true)),
+            BindVal::Bool(true)
+        ));
     }
 
     #[test]
@@ -1351,7 +1449,10 @@ mod tests {
         use postgres::types::{IsNull, ToSql, Type};
         let v = BindVal::Str(String::new());
         let mut out = postgres::types::private::BytesMut::new();
-        assert!(matches!(v.to_sql(&Type::TEXT, &mut out).unwrap(), IsNull::No));
+        assert!(matches!(
+            v.to_sql(&Type::TEXT, &mut out).unwrap(),
+            IsNull::No
+        ));
     }
 
     #[test]
@@ -1367,7 +1468,10 @@ mod tests {
         use postgres::types::{IsNull, ToSql, Type};
         let v = BindVal::Null;
         let mut out = postgres::types::private::BytesMut::new();
-        assert!(matches!(v.to_sql(&Type::TEXT, &mut out).unwrap(), IsNull::Yes));
+        assert!(matches!(
+            v.to_sql(&Type::TEXT, &mut out).unwrap(),
+            IsNull::Yes
+        ));
     }
 
     #[test]
@@ -1402,7 +1506,10 @@ mod tests {
         use postgres::types::{IsNull, ToSql, Type};
         let v = BindVal::I64(42);
         let mut out = postgres::types::private::BytesMut::new();
-        assert!(matches!(v.to_sql(&Type::OID, &mut out).unwrap(), IsNull::No));
+        assert!(matches!(
+            v.to_sql(&Type::OID, &mut out).unwrap(),
+            IsNull::No
+        ));
     }
 
     #[test]
@@ -1411,9 +1518,4 @@ mod tests {
         cli.user = Some("app".into());
         assert_eq!(build_config(&cli).unwrap().get_user(), Some("app"));
     }
-}
-
-#[allow(dead_code)]
-fn _force_hashmap_link() -> HashMap<(), ()> {
-    HashMap::new()
 }
