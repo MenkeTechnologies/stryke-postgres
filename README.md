@@ -186,7 +186,7 @@ Postgres::schema     $table, %opts → { table, schema, columns => [...], indexe
 ```stryke
 Postgres::helper_path()   → $abs_path
 Postgres::ensure_built()  → $abs_path     # cargo-builds if missing
-Postgres::version()       → "stryke-postgres-helper 0.1.1"
+Postgres::version()       → "stryke-postgres-helper X.Y.Z"
 ```
 
 ## [0x05] Helper protocol
@@ -262,7 +262,7 @@ where Postgres can't infer.
 ## [0x08] Tests
 
 ```sh
-cargo test                                       # unit tests (scaffold)
+cargo test                                       # unit + contract tests, no live calls
 POSTGRES_DSN='postgres://…' s test t/            # end-to-end against live Postgres
 ```
 
