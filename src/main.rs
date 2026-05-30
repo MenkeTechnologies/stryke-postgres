@@ -1650,4 +1650,118 @@ mod tests {
             _ => panic!("expected Query"),
         }
     }
+
+    // ─── clap parsing — global Cli flags + additional Cmd surfaces ─────
+    // Previous round pinned ping/query/tables/dump/schema/serve/columnar.
+    // These pin: (a) all DSN/host/port/user/password/database global flags
+    // default unset (driver picks); (b) --application-name has a stable
+    // default ("stryke-postgres-helper" — visible in pg_stat_activity);
+    // (c) Execute requires sql; (d) Exec requires --file; (e) Databases
+    // is unit-variant; (f) Tables --schema and Schema --schema both
+    // optional / default None (current_schema() fallback).
+
+    #[test]
+    fn cli_global_connection_flags_default_unset() {
+        // Pin: bare `ping` leaves all dsn/database_url/host/port/user/
+        // password/database flags None. Drift to a populated default
+        // would silently route writes to a hardcoded host.
+        let cli = unwrap_cli(parse_cli(&["ping"]));
+        assert!(cli.dsn.is_none());
+        assert!(cli.database_url.is_none());
+        assert!(cli.host.is_none());
+        assert!(cli.port.is_none());
+        assert!(cli.user.is_none());
+        assert!(cli.password.is_none());
+        assert!(cli.database.is_none());
+    }
+
+    #[test]
+    fn cli_application_name_default_is_helper_identity() {
+        // Pin: application_name default is "stryke-postgres-helper" — this
+        // is what shows up in pg_stat_activity and audit logs. Drift to
+        // empty / "postgres" would break operator-side connection tracking.
+        let cli = unwrap_cli(parse_cli(&["ping"]));
+        assert_eq!(cli.application_name, "stryke-postgres-helper");
+        assert_eq!(cli.connect_timeout, 10);
+    }
+
+    #[test]
+    fn cli_execute_requires_sql_and_exec_requires_file() {
+        // Pin: Execute mirrors Query's required-sql contract; Exec
+        // requires --file (no implicit script path).
+        assert_missing_required(parse_cli(&["execute"]));
+        assert_missing_required(parse_cli(&["exec"]));
+        let cli = unwrap_cli(parse_cli(&[
+            "execute",
+            "UPDATE t SET x = $1 WHERE id = $2",
+            "--bind",
+            r#"[1, 42]"#,
+        ]));
+        match cli.cmd {
+            Cmd::Execute { sql, bind } => {
+                assert_eq!(sql, "UPDATE t SET x = $1 WHERE id = $2");
+                assert_eq!(bind.as_deref(), Some(r#"[1, 42]"#));
+            }
+            _ => panic!("expected Execute"),
+        }
+        let cli = unwrap_cli(parse_cli(&["exec", "--file", "/tmp/migrations.sql"]));
+        match cli.cmd {
+            Cmd::Exec { file } => assert_eq!(file, PathBuf::from("/tmp/migrations.sql")),
+            _ => panic!("expected Exec"),
+        }
+    }
+
+    #[test]
+    fn cli_databases_unit_variant_and_tables_schema_optional() {
+        // Pin: Databases takes no positionals/flags. Tables --schema
+        // defaults None — meaning "use current_schema()" per docs.
+        let cli = unwrap_cli(parse_cli(&["databases"]));
+        assert!(matches!(cli.cmd, Cmd::Databases));
+        let cli = unwrap_cli(parse_cli(&["tables"]));
+        match cli.cmd {
+            Cmd::Tables { schema } => assert!(schema.is_none()),
+            _ => panic!("expected Tables"),
+        }
+        let cli = unwrap_cli(parse_cli(&["tables", "--schema", "public"]));
+        match cli.cmd {
+            Cmd::Tables { schema } => assert_eq!(schema.as_deref(), Some("public")),
+            _ => panic!("expected Tables"),
+        }
+    }
+
+    #[test]
+    fn cli_dump_optional_selectors_thread_through() {
+        // Pin: --columns / --where / --order-by / --limit all bind correctly
+        // when supplied. Drift would silently strip operator-specified
+        // projection or ordering from the generated SELECT.
+        let cli = unwrap_cli(parse_cli(&[
+            "dump",
+            "--table",
+            "events",
+            "--columns",
+            "id,kind,ts",
+            "--where",
+            "kind = 'click'",
+            "--order-by",
+            "ts DESC",
+            "--limit",
+            "1000",
+        ]));
+        match cli.cmd {
+            Cmd::Dump {
+                table,
+                columns,
+                where_clause,
+                order_by,
+                limit,
+            } => {
+                assert_eq!(table, "events");
+                assert_eq!(columns.as_deref(), Some("id,kind,ts"));
+                assert_eq!(where_clause.as_deref(), Some("kind = 'click'"));
+                assert_eq!(order_by.as_deref(), Some("ts DESC"));
+                assert_eq!(limit, Some(1000));
+            }
+            _ => panic!("expected Dump"),
+        }
+    }
 }
