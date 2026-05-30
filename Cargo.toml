@@ -6,6 +6,7 @@ description = "PostgreSQL bridge binary for the stryke `postgres` package."
 authors = ["MenkeTechnologies"]
 license = "MIT"
 repository = "https://github.com/MenkeTechnologies/stryke-postgres"
+homepage = "https://menketechnologies.github.io/stryke-postgres/"
 publish = false
 
 [[bin]]
