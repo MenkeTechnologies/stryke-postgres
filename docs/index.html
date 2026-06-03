@@ -141,7 +141,7 @@ postgres --help</pre>
 
       <section class="tutorial-section">
         <h2>Why a package, not a builtin</h2>
-        <p><code>tokio-postgres</code> with optional TLS via <code>rustls</code>. Designed for shell pipelines + scripts, not as an ORM layer.</p>
+        <p>Sync <code>postgres</code> crate. Designed for shell pipelines + scripts, not as an ORM layer.</p>
         <p>The stryke side is a thin NDJSON-pipe wrapper; the heavy code lives in the <code>stryke-postgres-helper</code> sidecar binary and is loaded on demand. Core stryke is never linked against this package's deps.</p>
       </section>
 

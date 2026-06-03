@@ -94,7 +94,7 @@
 
       <h2 class="tutorial-title"><span class="step-hash">&gt;_</span>EXECUTIVE SUMMARY</h2>
       <p class="tutorial-subtitle"><strong>stryke-postgres</strong> is one of the 14 opt-in connector packages in the stryke ecosystem. PostgreSQL client for stryke. Opt-in package, kept out of the stryke core binary. NDJSON-by-default output; bind parameters supported.</p>
-      <p class="tutorial-subtitle"><code>tokio-postgres</code> with optional TLS via <code>rustls</code>. Designed for shell pipelines + scripts, not as an ORM layer.</p>
+      <p class="tutorial-subtitle">Sync <code>postgres</code> crate. Designed for shell pipelines + scripts, not as an ORM layer.</p>
 
       <div class="stat-grid">
         <div class="stat-card"><div class="stat-val">postgres</div><div class="stat-label">CLI launcher</div></div>
@@ -110,7 +110,7 @@
         <thead><tr><th>Layer</th><th>Implementation</th></tr></thead>
         <tbody>
           <tr><td>stryke library (<code>lib/*.stk</code>)</td><td>Thin wrapper exposing typed functions; serializes args to NDJSON, deserializes responses</td></tr>
-          <tr><td>Helper binary (<code>stryke-postgres-helper</code>)</td><td>Rust async (tokio); reads NDJSON from stdin, dispatches, writes NDJSON to stdout</td></tr>
+          <tr><td>Helper binary (<code>stryke-postgres-helper</code>)</td><td>Rust sync; reads NDJSON from stdin, dispatches, writes NDJSON to stdout</td></tr>
           <tr><td>Process model</td><td>One helper subprocess per stryke session; lives as long as the stryke runtime needs it</td></tr>
           <tr><td>Build</td><td>Cargo with <code>publish = false</code> on the helper crate; the package itself ships via <code>s pkg install -g .</code></td></tr>
           <tr><td>Install path</td><td><code>~/.stryke/bin/postgres</code> after <code>make install</code>; PATH-resolvable from any shell</td></tr>
@@ -121,7 +121,7 @@
 
       <hr class="section-rule">
       <h2 class="tutorial-title"><span class="step-hash">$</span>WHY OPT-IN (NOT BUILTIN)</h2>
-      <p><code>tokio-postgres</code> with optional TLS via <code>rustls</code>. Designed for shell pipelines + scripts, not as an ORM layer.</p>
+      <p>Sync <code>postgres</code> crate. Designed for shell pipelines + scripts, not as an ORM layer.</p>
       <p>The trade-off is intentional. The core <code>stryke</code> binary stays under ~40 MB precisely because each connector ships separately. Daily-driver work (one-liners, awk replacement, data scripting) doesn't need MongoDB drivers, AWS SDKs, or Spark Connect bindings linked in.</p>
 
       <hr class="section-rule">
