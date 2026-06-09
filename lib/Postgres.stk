@@ -1,13 +1,13 @@
-# lib/Postgres.stk — PostgreSQL client for stryke (`use Postgres`).
-#
-# Thin wrapper around the `stryke-postgres` cdylib's `pg__*` exports.
-# The cdylib is dlopened in-process on first `use Postgres` (see stryke's
-# `pkg/commands.rs::try_load_ffi_for`) and registers each export as a
-# stryke-callable function via `rust_ffi::load_cdylib`.
-#
-# Replaces the v1 helper-binary model (fork(2) + exec(2) + fresh TCP+TLS+
-# auth handshake per call). The cdylib caches one `postgres::Client` per
-# connection URL — back-to-back calls reuse the same connection object.
+## lib/Postgres.stk — PostgreSQL client for stryke (`use Postgres`).
+##
+## Thin wrapper around the `stryke-postgres` cdylib's `pg__*` exports.
+## The cdylib is dlopened in-process on first `use Postgres` (see stryke's
+## `pkg/commands.rs::try_load_ffi_for`) and registers each export as a
+## stryke-callable function via `rust_ffi::load_cdylib`.
+##
+## Replaces the v1 helper-binary model (fork(2) + exec(2) + fresh TCP+TLS+
+## auth handshake per call). The cdylib caches one `postgres::Client` per
+## connection URL — back-to-back calls reuse the same connection object.
 
 package Postgres
 
@@ -99,7 +99,7 @@ fn Postgres::query_scalar ($sql, %opts) {
     $r[0]->{$keys[0]}
 }
 
-# Callback fires per row; cdylib returns all rows in one call.
+## Callback fires per row; cdylib returns all rows in one call.
 fn Postgres::query_stream ($sql, %opts) {
     die "Postgres::query_stream: callback => sub { … } required" unless defined $opts{callback}
     my $cb = $opts{callback}
