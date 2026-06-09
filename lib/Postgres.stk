@@ -158,4 +158,3 @@ fn Postgres::insert_many ($table, $rows, %opts) {
     Postgres::_decode("insert_many", pg__insert_many(to_json($r)))->{inserted}
 }
 
-1
