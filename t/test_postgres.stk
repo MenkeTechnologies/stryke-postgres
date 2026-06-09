@@ -1,139 +1,92 @@
-# t/test_postgres.stk — round-trip tests against a live Postgres.
-#
-# Requires the cdylib to be loaded. Install once with `s pkg install -g .`
-# from the package root so stryke's FFI bridge dlopens
-# lib/libstryke_postgres.{dylib,so} on `use Postgres`.
+## t/test_postgres.stk — assertion tests for the stryke `Postgres` package.
+##
+## Uses stryke's native test framework (`assert_*` + `test_run`).
+## Requires the cdylib to be loaded — install once with `s pkg install -g .`
+## so stryke's FFI bridge dlopens `lib/libstryke_postgres.{dylib,so}` on
+## `use Postgres`. Live tests use a unique table `stryke_postgres_test_$$`
+## when $DATABASE_URL (or $POSTGRES_URL / $POSTGRES_DSN) is reachable.
 
 use Postgres
 
-val $have_cdylib = eval { Postgres::version(); 1 }
+# ── permission-free: cdylib reachable ───────────────────────────────
+val $version = Postgres::version()
+assert_ok $version, "Postgres::version returns truthy (cdylib loaded)"
+
+# ── liveness probe ──────────────────────────────────────────────────
 val $dsn = $ENV{DATABASE_URL} // $ENV{POSTGRES_URL} // $ENV{POSTGRES_DSN}
+val $alive = defined $dsn && $dsn ne "" && eval { Postgres::ping(url => $dsn) }
 
-unless ($have_cdylib) {
-    p "1..0 # SKIP cdylib not loaded — run `s pkg install -g .` first"
-    exit 0
-}
-unless (defined $dsn && $dsn ne "") {
-    p "1..0 # SKIP \$DATABASE_URL not set"
-    exit 0
-}
-unless (eval { Postgres::ping(url => $dsn) }) {
-    p "1..0 # SKIP cannot connect to $dsn"
-    exit 0
-}
+if ($alive) {
+    val $tbl = "stryke_postgres_test_$$"
+    eval { Postgres::execute("DROP TABLE IF EXISTS $tbl", dsn => $dsn) }
 
-val $tbl = "stryke_postgres_test_$$"
-p "1..11"
-var $i = 0
-
-eval { Postgres::execute("DROP TABLE IF EXISTS $tbl", dsn => $dsn) }
-var $r
-eval {
-    $r = Postgres::execute(
+    # create
+    Postgres::execute(
         "CREATE TABLE $tbl (id SERIAL PRIMARY KEY, name TEXT, score DOUBLE PRECISION, payload JSONB)",
         dsn => $dsn,
     )
-}
-$i++
-p $@ ? "not ok $i - create table: $@" : "ok $i - create table"
+    assert_ok 1, "create table"
 
-eval {
-    $r = Postgres::execute(
+    # insert with positional binds + JSONB payload
+    val $ins = Postgres::execute(
         "INSERT INTO $tbl (name, score, payload) VALUES (\$1,\$2,\$3),(\$4,\$5,\$6),(\$7,\$8,\$9)",
         dsn  => $dsn,
         bind => ["alice", 1.5, {color => "blue"},
                  "bob",   2.0, {color => "red"},
                  "charlie", 3.25, {color => "green"}],
     )
-}
-$i++
-p $@ ? "not ok $i - insert: $@" :
-       ($r->{affected_rows} == 3 ? "ok $i - insert 3 rows" :
-        "not ok $i - insert affected=$r->{affected_rows}")
+    assert_eq $ins->{affected_rows}, 3, "insert: affected_rows=3"
 
-var @rows
-eval { @rows = Postgres::query("SELECT * FROM $tbl ORDER BY id", dsn => $dsn) }
-$i++
-p $@ ? "not ok $i - select: $@" :
-       (len(@rows) == 3 ? "ok $i - select 3 rows" :
-        "not ok $i - select got " . len(@rows) . " rows")
+    # select
+    val @rows = Postgres::query("SELECT * FROM $tbl ORDER BY id", dsn => $dsn)
+    assert_eq scalar(@rows), 3, "select: 3 rows"
 
-eval { @rows = Postgres::query("SELECT * FROM $tbl WHERE name = \$1", dsn => $dsn, bind => ["bob"]) }
-$i++
-p $@ ? "not ok $i - bind query: $@" :
-       (len(@rows) == 1 && $rows[0]->{name} eq "bob"
-            ? "ok $i - bind query"
-            : "not ok $i - bind query wrong shape")
+    # bind in query
+    val @bobs = Postgres::query("SELECT * FROM $tbl WHERE name = \$1", dsn => $dsn, bind => ["bob"])
+    assert_eq scalar(@bobs), 1, "bind query: 1 row"
+    assert_eq $bobs[0]->{name}, "bob", "bind query: name=bob"
 
-var $scalar
-eval { $scalar = Postgres::query_scalar("SELECT COUNT(*) AS n FROM $tbl", dsn => $dsn) }
-$i++
-p $@ ? "not ok $i - query_scalar: $@" :
-       ($scalar == 3 ? "ok $i - query_scalar" : "not ok $i - query_scalar got $scalar")
+    # query_scalar
+    assert_eq Postgres::query_scalar("SELECT COUNT(*) AS n FROM $tbl", dsn => $dsn), 3, "query_scalar count"
 
-var $one
-eval { $one = Postgres::query_one("SELECT * FROM $tbl WHERE name = \$1", dsn => $dsn, bind => ["alice"]) }
-$i++
-p $@ ? "not ok $i - query_one: $@" :
-       (defined $one && $one->{name} eq "alice" && $one->{payload}->{color} eq "blue"
-            ? "ok $i - query_one (jsonb decoded)"
-            : "not ok $i - query_one wrong")
+    # query_one with jsonb decode
+    val $one = Postgres::query_one("SELECT * FROM $tbl WHERE name = \$1", dsn => $dsn, bind => ["alice"])
+    assert_eq $one->{name}, "alice", "query_one: name"
+    assert_eq $one->{payload}->{color}, "blue", "query_one: jsonb payload decoded"
 
-var @col
-eval { @col = Postgres::query_col("SELECT name FROM $tbl ORDER BY id", dsn => $dsn) }
-$i++
-p $@ ? "not ok $i - query_col: $@" :
-       (len(@col) == 3 && $col[0] eq "alice"
-            ? "ok $i - query_col"
-            : "not ok $i - query_col wrong")
+    # query_col
+    val @names = Postgres::query_col("SELECT name FROM $tbl ORDER BY id", dsn => $dsn)
+    assert_eq scalar(@names), 3, "query_col: 3 names"
+    assert_eq $names[0], "alice", "query_col: first=alice"
 
-var $sch
-eval { $sch = Postgres::schema($tbl, dsn => $dsn) }
-$i++
-p $@ ? "not ok $i - schema: $@" :
-       (ref($sch->{columns}) eq "ARRAY" && len(@{$sch->{columns}}) == 4
-            ? "ok $i - schema (4 cols)"
-            : "not ok $i - schema bad shape")
+    # schema
+    val $sch = Postgres::schema($tbl, dsn => $dsn)
+    assert_eq ref($sch->{columns}), "ARRAY", "schema: columns is array"
+    assert_eq scalar(@{$sch->{columns}}), 4, "schema: 4 columns"
 
-var @tables
-eval { @tables = Postgres::tables(dsn => $dsn) }
-$i++
-if ($@) {
-    p "not ok $i - tables: $@"
-} else {
-    var $found = 0
-    for val $t (@tables) {
-        $found = 1 if $t eq $tbl
-    }
-    p ($found ? "ok $i - tables (found $tbl)"
-              : "not ok $i - tables missing $tbl (saw " . len(@tables) . " total)")
-}
+    # tables list contains ours
+    val @tables = Postgres::tables(dsn => $dsn)
+    val $found = grep { $_ eq $tbl } @tables
+    assert_ok $found, "tables: contains $tbl"
 
-var $r2
-eval {
-    $r2 = Postgres::insert_many($tbl,
+    # insert_many
+    val $im = Postgres::insert_many($tbl,
         [{ name => "dana", score => 4.0, payload => { color => "purple" } },
          { name => "eve",  score => 5.5, payload => { color => "yellow" } }],
         dsn => $dsn,
     )
-}
-$i++
-p $@ ? "not ok $i - insert_many: $@" :
-       ($r2->{affected_rows} == 2 ? "ok $i - insert_many" : "not ok $i - insert_many wrong count")
+    assert_eq $im->{affected_rows}, 2, "insert_many: affected_rows=2"
 
-# RETURNING — verify generated IDs come back as rows.
-var @returned
-eval {
-    @returned = Postgres::insert_many($tbl,
+    # insert_many with RETURNING — generated IDs come back as rows
+    val @returned = Postgres::insert_many($tbl,
         [{ name => "frank", score => 6.0, payload => { color => "orange" } }],
         dsn => $dsn,
         returning => "id",
     )
-}
-$i++
-p $@ ? "not ok $i - insert_many returning: $@" :
-       (len(@returned) == 1 && defined $returned[0]->{id}
-            ? "ok $i - insert_many returning id=$returned[0]->{id}"
-            : "not ok $i - insert_many returning wrong shape")
+    assert_eq scalar(@returned), 1, "insert_many RETURNING: 1 row back"
+    assert_ok defined $returned[0]->{id}, "insert_many RETURNING: id defined"
 
-eval { Postgres::execute("DROP TABLE $tbl", dsn => $dsn) }
+    eval { Postgres::execute("DROP TABLE $tbl", dsn => $dsn) }
+}
+
+test_run

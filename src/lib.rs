@@ -502,3 +502,170 @@ pub extern "C" fn pg__dump(args: *const c_char) -> *const c_char {
 pub extern "C" fn pg__insert_many(args: *const c_char) -> *const c_char {
     ffi_call(args, op_insert_many)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn with_env<F: FnOnce()>(f: F) {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let saved = [
+            ("DATABASE_URL", std::env::var("DATABASE_URL").ok()),
+            ("POSTGRES_URL", std::env::var("POSTGRES_URL").ok()),
+        ];
+        std::env::remove_var("DATABASE_URL");
+        std::env::remove_var("POSTGRES_URL");
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+        for (k, v) in &saved {
+            match v {
+                Some(s) => std::env::set_var(k, s),
+                None => std::env::remove_var(k),
+            }
+        }
+        if let Err(p) = result {
+            std::panic::resume_unwind(p);
+        }
+    }
+
+    // ── url_from_opts ──
+
+    #[test]
+    fn url_opts_wins_over_env() {
+        with_env(|| {
+            std::env::set_var("DATABASE_URL", "postgresql://env@h/db");
+            assert_eq!(
+                url_from_opts(&json!({"url": "postgresql://opts@h/db"})),
+                "postgresql://opts@h/db"
+            );
+        });
+    }
+
+    #[test]
+    fn url_database_url_preferred_over_postgres_url() {
+        with_env(|| {
+            std::env::set_var("DATABASE_URL", "from-db-url");
+            std::env::set_var("POSTGRES_URL", "from-pg-url");
+            assert_eq!(url_from_opts(&json!({})), "from-db-url");
+        });
+    }
+
+    #[test]
+    fn url_postgres_url_fallback() {
+        with_env(|| {
+            std::env::set_var("POSTGRES_URL", "from-pg-url");
+            assert_eq!(url_from_opts(&json!({})), "from-pg-url");
+        });
+    }
+
+    #[test]
+    fn url_default_assembled_from_pieces() {
+        with_env(|| {
+            assert_eq!(
+                url_from_opts(&json!({})),
+                "postgresql://postgres@127.0.0.1:5432/"
+            );
+        });
+    }
+
+    #[test]
+    fn url_uses_opts_overrides_when_no_url_or_env() {
+        with_env(|| {
+            let u = url_from_opts(&json!({
+                "host": "pg.example.com",
+                "port": 6432,
+                "user": "ada",
+                "database": "shop",
+            }));
+            assert_eq!(u, "postgresql://ada@pg.example.com:6432/shop");
+        });
+    }
+
+    #[test]
+    fn url_password_inserted_when_set() {
+        with_env(|| {
+            let u = url_from_opts(&json!({"user": "ada", "password": "hunter2"}));
+            assert!(u.contains("ada:hunter2@"), "{u}");
+        });
+    }
+
+    #[test]
+    fn url_no_stray_colon_when_password_blank() {
+        with_env(|| {
+            let u = url_from_opts(&json!({"user": "ada"}));
+            assert!(!u.contains(":@"), "{u}");
+        });
+    }
+
+    // ── json_to_param ──
+
+    #[test]
+    fn jp_null() {
+        assert!(matches!(json_to_param(&Value::Null), PgParam::Null));
+    }
+
+    #[test]
+    fn jp_bool() {
+        assert!(matches!(json_to_param(&json!(true)), PgParam::Bool(true)));
+        assert!(matches!(json_to_param(&json!(false)), PgParam::Bool(false)));
+    }
+
+    #[test]
+    fn jp_int() {
+        match json_to_param(&json!(42)) {
+            PgParam::Int(42) => {}
+            other => panic!("expected Int(42), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn jp_float() {
+        match json_to_param(&json!(1.5)) {
+            PgParam::Float(f) if (f - 1.5).abs() < 1e-9 => {}
+            other => panic!("expected Float(1.5), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn jp_string() {
+        match json_to_param(&json!("hi")) {
+            PgParam::Str(s) => assert_eq!(s, "hi"),
+            other => panic!("expected Str, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn jp_array_falls_back_to_json() {
+        // Arrays/objects survive as `PgParam::Json` and are bound via
+        // postgres's JSON/JSONB codec — callers can target JSONB columns.
+        match json_to_param(&json!([1, 2, 3])) {
+            PgParam::Json(v) => assert_eq!(v, json!([1, 2, 3])),
+            other => panic!("expected Json, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn jp_object_falls_back_to_json() {
+        match json_to_param(&json!({"k": "v"})) {
+            PgParam::Json(v) => assert_eq!(v["k"], json!("v")),
+            other => panic!("expected Json, got {other:?}"),
+        }
+    }
+
+    // ── params_from_value ──
+
+    #[test]
+    fn params_array_yields_vec() {
+        let p = params_from_value(&json!([1, "two", null]));
+        assert_eq!(p.len(), 3);
+    }
+
+    #[test]
+    fn params_non_array_yields_empty_vec() {
+        assert!(params_from_value(&json!({"a": 1})).is_empty());
+        assert!(params_from_value(&Value::Null).is_empty());
+        assert!(params_from_value(&json!("scalar")).is_empty());
+    }
+}
