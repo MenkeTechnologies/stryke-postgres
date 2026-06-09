@@ -6,8 +6,8 @@
 
 use Postgres
 
-my $have_cdylib = eval { Postgres::version(); 1 }
-my $dsn = $ENV{DATABASE_URL} // $ENV{POSTGRES_URL} // $ENV{POSTGRES_DSN}
+val $have_cdylib = eval { Postgres::version(); 1 }
+val $dsn = $ENV{DATABASE_URL} // $ENV{POSTGRES_URL} // $ENV{POSTGRES_DSN}
 
 unless ($have_cdylib) {
     p "1..0 # SKIP cdylib not loaded — run `s pkg install -g .` first"
@@ -22,12 +22,12 @@ unless (eval { Postgres::ping(url => $dsn) }) {
     exit 0
 }
 
-my $tbl = "stryke_postgres_test_$$"
+val $tbl = "stryke_postgres_test_$$"
 p "1..11"
-my $i = 0
+var $i = 0
 
 eval { Postgres::execute("DROP TABLE IF EXISTS $tbl", dsn => $dsn) }
-my $r
+var $r
 eval {
     $r = Postgres::execute(
         "CREATE TABLE $tbl (id SERIAL PRIMARY KEY, name TEXT, score DOUBLE PRECISION, payload JSONB)",
@@ -51,7 +51,7 @@ p $@ ? "not ok $i - insert: $@" :
        ($r->{affected_rows} == 3 ? "ok $i - insert 3 rows" :
         "not ok $i - insert affected=$r->{affected_rows}")
 
-my @rows
+var @rows
 eval { @rows = Postgres::query("SELECT * FROM $tbl ORDER BY id", dsn => $dsn) }
 $i++
 p $@ ? "not ok $i - select: $@" :
@@ -65,13 +65,13 @@ p $@ ? "not ok $i - bind query: $@" :
             ? "ok $i - bind query"
             : "not ok $i - bind query wrong shape")
 
-my $scalar
+var $scalar
 eval { $scalar = Postgres::query_scalar("SELECT COUNT(*) AS n FROM $tbl", dsn => $dsn) }
 $i++
 p $@ ? "not ok $i - query_scalar: $@" :
        ($scalar == 3 ? "ok $i - query_scalar" : "not ok $i - query_scalar got $scalar")
 
-my $one
+var $one
 eval { $one = Postgres::query_one("SELECT * FROM $tbl WHERE name = \$1", dsn => $dsn, bind => ["alice"]) }
 $i++
 p $@ ? "not ok $i - query_one: $@" :
@@ -79,7 +79,7 @@ p $@ ? "not ok $i - query_one: $@" :
             ? "ok $i - query_one (jsonb decoded)"
             : "not ok $i - query_one wrong")
 
-my @col
+var @col
 eval { @col = Postgres::query_col("SELECT name FROM $tbl ORDER BY id", dsn => $dsn) }
 $i++
 p $@ ? "not ok $i - query_col: $@" :
@@ -87,7 +87,7 @@ p $@ ? "not ok $i - query_col: $@" :
             ? "ok $i - query_col"
             : "not ok $i - query_col wrong")
 
-my $sch
+var $sch
 eval { $sch = Postgres::schema($tbl, dsn => $dsn) }
 $i++
 p $@ ? "not ok $i - schema: $@" :
@@ -95,21 +95,21 @@ p $@ ? "not ok $i - schema: $@" :
             ? "ok $i - schema (4 cols)"
             : "not ok $i - schema bad shape")
 
-my @tables
+var @tables
 eval { @tables = Postgres::tables(dsn => $dsn) }
 $i++
 if ($@) {
     p "not ok $i - tables: $@"
 } else {
-    my $found = 0
-    for my $t (@tables) {
+    var $found = 0
+    for val $t (@tables) {
         $found = 1 if $t eq $tbl
     }
     p ($found ? "ok $i - tables (found $tbl)"
               : "not ok $i - tables missing $tbl (saw " . len(@tables) . " total)")
 }
 
-my $r2
+var $r2
 eval {
     $r2 = Postgres::insert_many($tbl,
         [{ name => "dana", score => 4.0, payload => { color => "purple" } },
@@ -122,7 +122,7 @@ p $@ ? "not ok $i - insert_many: $@" :
        ($r2->{affected_rows} == 2 ? "ok $i - insert_many" : "not ok $i - insert_many wrong count")
 
 # RETURNING — verify generated IDs come back as rows.
-my @returned
+var @returned
 eval {
     @returned = Postgres::insert_many($tbl,
         [{ name => "frank", score => 6.0, payload => { color => "orange" } }],

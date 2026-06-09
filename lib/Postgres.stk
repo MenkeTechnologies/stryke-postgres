@@ -15,7 +15,7 @@ package Postgres
 
 ## Decode the cdylib's JSON return; die on `{error}` payload.
 fn Postgres::_decode ($name, $json) {
-    my $o = from_json $json
+    val $o = from_json $json
     if (ref $o eq "HASH" && exists $o->{error}) {
         die "Postgres::$name: $o->{error}"
     }
@@ -24,8 +24,8 @@ fn Postgres::_decode ($name, $json) {
 
 ## Build the FFI request hash by merging the caller's connection opts.
 fn Postgres::_req ($extra, $opts) {
-    my %r = %$extra
-    for my $k (qw(url host port user password database)) {
+    var %r = %$extra
+    for val $k (qw(url host port user password database)) {
         $r{$k} = $opts->{$k} if exists $opts->{$k} && defined $opts->{$k}
     }
     if (!exists $r{url} && !exists $r{host}) {
@@ -57,14 +57,14 @@ fn Postgres::ping (%opts) {
 
 ## List databases (non-template).
 fn Postgres::databases (%opts) {
-    my $o = Postgres::_decode("databases",
+    val $o = Postgres::_decode("databases",
         pg__databases(to_json(Postgres::_req({}, \%opts))))
     @{ $o->{databases} }
 }
 
 ## List tables in the public schema.
 fn Postgres::tables (%opts) {
-    my $o = Postgres::_decode("tables",
+    val $o = Postgres::_decode("tables",
         pg__tables(to_json(Postgres::_req({}, \%opts))))
     @{ $o->{tables} }
 }
@@ -84,41 +84,41 @@ fn Postgres::query ($sql, %opts) {
 
 ## Internal query implementation; see public wrappers.
 fn Postgres::_query_impl ($sql, $o) {
-    my $r = Postgres::_req({ sql => $sql, params => $o->{bind} }, $o)
-    my $res = Postgres::_decode("query", pg__query(to_json($r)))
+    val $r = Postgres::_req({ sql => $sql, params => $o->{bind} }, $o)
+    val $res = Postgres::_decode("query", pg__query(to_json($r)))
     @{ $res->{rows} }
 }
 
 ## Run a SELECT LIMIT 1; return one row hashref or undef.
 fn Postgres::query_one ($sql, %opts) {
-    my @r = Postgres::_query_impl($sql, \%opts)
+    val @r = Postgres::_query_impl($sql, \%opts)
     @r ? $r[0] : undef
 }
 
 ## Run a SELECT; return the first column as a flat list.
 fn Postgres::query_col ($sql, %opts) {
-    my @rows = Postgres::_query_impl($sql, \%opts)
+    val @rows = Postgres::_query_impl($sql, \%opts)
     return () unless @rows
-    my @keys = keys %{ $rows[0] }
-    my $first = $keys[0]
+    val @keys = keys %{ $rows[0] }
+    val $first = $keys[0]
     map { $_->{$first} } @rows
 }
 
 ## Run a SELECT LIMIT 1; return the first cell.
 fn Postgres::query_scalar ($sql, %opts) {
-    my @r = Postgres::_query_impl($sql, \%opts)
+    val @r = Postgres::_query_impl($sql, \%opts)
     return undef unless @r
-    my @keys = keys %{ $r[0] }
+    val @keys = keys %{ $r[0] }
     $r[0]->{$keys[0]}
 }
 
 ## Callback fires per row; cdylib returns all rows in one call.
 fn Postgres::query_stream ($sql, %opts) {
     die "Postgres::query_stream: callback => sub { … } required" unless defined $opts{callback}
-    my $cb = $opts{callback}
-    my @rows = Postgres::_query_impl($sql, \%opts)
-    my $n = 0
-    for my $row (@rows) {
+    val $cb = $opts{callback}
+    val @rows = Postgres::_query_impl($sql, \%opts)
+    var $n = 0
+    for val $row (@rows) {
         $cb->($row)
         $n++
     }
@@ -127,8 +127,8 @@ fn Postgres::query_stream ($sql, %opts) {
 
 ## SELECT * FROM $table [LIMIT N] shorthand.
 fn Postgres::dump ($table, %opts) {
-    my $r = Postgres::_req({ table => $table, limit => $opts{limit} }, \%opts)
-    my $res = Postgres::_decode("dump", pg__dump(to_json($r)))
+    val $r = Postgres::_req({ table => $table, limit => $opts{limit} }, \%opts)
+    val $res = Postgres::_decode("dump", pg__dump(to_json($r)))
     @{ $res->{rows} }
 }
 
@@ -136,25 +136,25 @@ fn Postgres::dump ($table, %opts) {
 
 ## Run a non-SELECT statement; returns { affected }.
 fn Postgres::execute ($sql, %opts) {
-    my $r = Postgres::_req({ sql => $sql, params => $opts{bind} }, \%opts)
+    val $r = Postgres::_req({ sql => $sql, params => $opts{bind} }, \%opts)
     Postgres::_decode("execute", pg__execute(to_json($r)))
 }
 
 ## Read SQL from $path and run as a multi-statement script.
 fn Postgres::exec_file ($path, %opts) {
     die "Postgres::exec_file: file `$path` not found" unless -e $path
-    open my $fh, "<", $path or die "Postgres::exec_file: open $path: $!"
+    open val $fh, "<", $path or die "Postgres::exec_file: open $path: $!"
     local $/
-    my $sql = <$fh>
+    val $sql = <$fh>
     close $fh
-    my $r = Postgres::_req({ sql => $sql }, \%opts)
+    val $r = Postgres::_req({ sql => $sql }, \%opts)
     Postgres::_decode("exec", pg__exec(to_json($r)))
 }
 
 ## Bulk INSERT $rows (arrayref of hashrefs) into $table.
 fn Postgres::insert_many ($table, $rows, %opts) {
     die "Postgres::insert_many: rows must be arrayref of hashrefs" unless ref($rows) eq "ARRAY"
-    my $r = Postgres::_req({ table => $table, rows => $rows }, \%opts)
+    val $r = Postgres::_req({ table => $table, rows => $rows }, \%opts)
     Postgres::_decode("insert_many", pg__insert_many(to_json($r)))->{inserted}
 }
 

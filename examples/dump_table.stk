@@ -5,13 +5,13 @@
 
 use Postgres
 
-my $tbl = $ARGV[0]
+val $tbl = $ARGV[0]
 die "usage: dump_table.stk TABLE\n" unless defined $tbl
 
-my $dsn = $ENV{POSTGRES_DSN} // $ENV{DATABASE_URL}
+val $dsn = $ENV{POSTGRES_DSN} // $ENV{DATABASE_URL}
 die "set \$POSTGRES_DSN\n" unless defined $dsn
 
-my $n = Postgres::query_stream(
+val $n = Postgres::query_stream(
     "SELECT * FROM $tbl",
     dsn      => $dsn,
     callback => sub ($row) { p to_json $row },
