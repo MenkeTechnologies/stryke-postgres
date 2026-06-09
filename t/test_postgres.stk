@@ -1,23 +1,23 @@
 # t/test_postgres.stk — round-trip tests against a live Postgres.
 #
-# Skips cleanly when $POSTGRES_DSN is unset OR the helper isn't built.
-# Local dev:
-#   export POSTGRES_DSN="postgres://wizard@127.0.0.1:5432/stryke_test"
+# Requires the cdylib to be loaded. Install once with `s pkg install -g .`
+# from the package root so stryke's FFI bridge dlopens
+# lib/libstryke_postgres.{dylib,so} on `use Postgres`.
 
-require "./lib/Postgres.stk"
+use Postgres
 
-my $have_helper = eval { Postgres::helper_path(); 1 }
-my $dsn = $ENV{POSTGRES_DSN} // $ENV{DATABASE_URL}
+my $have_cdylib = eval { Postgres::version(); 1 }
+my $dsn = $ENV{DATABASE_URL} // $ENV{POSTGRES_URL} // $ENV{POSTGRES_DSN}
 
-unless ($have_helper) {
-    p "1..0 # SKIP helper not built — run `cargo build --release` first"
+unless ($have_cdylib) {
+    p "1..0 # SKIP cdylib not loaded — run `s pkg install -g .` first"
     exit 0
 }
 unless (defined $dsn && $dsn ne "") {
-    p "1..0 # SKIP \$POSTGRES_DSN not set"
+    p "1..0 # SKIP \$DATABASE_URL not set"
     exit 0
 }
-unless (Postgres::ping(dsn => $dsn)) {
+unless (eval { Postgres::ping(url => $dsn) }) {
     p "1..0 # SKIP cannot connect to $dsn"
     exit 0
 }

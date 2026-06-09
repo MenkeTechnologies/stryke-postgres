@@ -1,15 +1,28 @@
 [package]
 name = "postgres"
-version = "0.1.0"
-description = "PostgreSQL client for stryke. Opt-in package tier; persistent connection daemon over a Unix socket plus single-shot mode."
+version = "0.2.0"
+description = "PostgreSQL client for stryke. cdylib loaded in-process — persistent postgres::Client per connection URL across calls."
 authors = ["MenkeTechnologies"]
 license = "MIT"
 repository = "https://github.com/MenkeTechnologies/stryke-postgres"
 edition = "2026"
 
-[bin]
-postgres = "bin/postgres.stk"
-postgres-build = "bin/postgres-build.stk"
+[ffi]
+lib-name = "stryke_postgres"
+namespace = "Postgres"
+exports = [
+    "pg__pkg_version",
+    "pg__version",
+    "pg__ping",
+    "pg__databases",
+    "pg__tables",
+    "pg__schema",
+    "pg__query",
+    "pg__execute",
+    "pg__exec",
+    "pg__dump",
+    "pg__insert_many",
+]
 
 [scripts]
 build = "cargo build --release"

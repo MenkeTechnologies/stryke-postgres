@@ -63,58 +63,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --locked --no-fail-fast
 
-  helper-live-pg:
-    name: Helper end-to-end (live Postgres)
-    runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: postgres:16
-        env:
-          POSTGRES_USER: stryke
-          POSTGRES_PASSWORD: secret
-          POSTGRES_DB: stryke_test
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd="pg_isready -U stryke -d stryke_test"
-          --health-interval=5s
-          --health-timeout=3s
-          --health-retries=30
-    env:
-      POSTGRES_DSN: postgres://stryke:secret@127.0.0.1:5432/stryke_test
-    steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-
-      - run: cargo build --release --locked
-
-      - name: Wait for postgres ready
-        run: |
-          for i in $(seq 1 30); do
-            pg_isready -h 127.0.0.1 -U stryke -d stryke_test >/dev/null 2>&1 && exit 0
-            sleep 2
-          done
-          echo "postgres never came up" >&2
-          exit 1
-
-      - name: Helper ping
-        run: ./target/release/stryke-postgres-helper ping
-
-      - name: Round-trip (write/read/schema/jsonb)
-        run: |
-          set -euo pipefail
-          H=./target/release/stryke-postgres-helper
-          $H execute 'CREATE TABLE ci_smoke (id SERIAL PRIMARY KEY, name TEXT, score DOUBLE PRECISION, data JSONB)' | jq -e '.affected_rows == 0'
-          $H execute 'INSERT INTO ci_smoke (name, score, data) VALUES ($1, $2, $3)' --bind='["alice", 1.5, {"color":"blue"}]' | jq -e '.affected_rows == 1'
-          $H execute 'INSERT INTO ci_smoke (name, score, data) VALUES ($1, $2, $3)' --bind='["bob",   2.5, {"color":"red"}]'  | jq -e '.affected_rows == 1'
-          $H query 'SELECT name FROM ci_smoke WHERE score > $1::float8' --bind='[1.0]' --columnar | jq -e '.num_rows == 2'
-          $H query 'SELECT data FROM ci_smoke WHERE name = $1' --bind='["alice"]' | jq -e '.data.color == "blue"'
-          $H schema --table ci_smoke | jq -e '.columns | length == 4'
-          $H tables | grep -q ci_smoke
-          $H databases | grep -q stryke_test
-          $H execute 'DROP TABLE ci_smoke' | jq -e 'has("affected_rows")'
-
   doc:
     name: Doc
     runs-on: ubuntu-latest
@@ -128,7 +76,7 @@ jobs:
 
   release-build:
     name: Release Build (${{ matrix.target }})
-    needs: [check, test, helper-live-pg]
+    needs: [check, test]
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -150,7 +98,7 @@ jobs:
       - uses: actions/upload-artifact@v6
         with:
           name: stryke-postgres-${{ matrix.target }}
-          path: target/${{ matrix.target }}/release/stryke-postgres-helper
+          path: target/${{ matrix.target }}/release/libstryke_postgres.*
 
   docs-gates:
     name: Docs gates

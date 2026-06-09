@@ -6,10 +6,10 @@ all: release
 help:
 	@printf '%s\n' \
 	  'targets:' \
-	  '  make release   - cargo build --release  (default; produces target/release/stryke-postgres-helper)' \
+	  '  make release   - cargo build --release  (default; produces target/release/libstryke_postgres.{dylib,so})' \
 	  '  make debug     - cargo build  (faster compile, slower binary)' \
-	  '  make test      - cargo test then `s test t/`  (skips when $$POSTGRES_DSN unset)' \
-	  '  make install   - `s pkg install -g .` (registers postgres/postgres-build CLI launchers)' \
+	  '  make test      - cargo test then `s test t/`  (skips when $$DATABASE_URL unset)' \
+	  '  make install   - `s pkg install -g .` (cdylib lands in ~/.stryke/store/postgres@<ver>/)' \
 	  '  make clean     - cargo clean'
 
 release:

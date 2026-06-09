@@ -54,10 +54,18 @@ helper per call and parses NDJSON over a pipe.
 
 ## [0x01] Install
 
+From a release (no rustc on the consumer machine):
+
+```sh
+s pkg install -g github.com/MenkeTechnologies/stryke-postgres
+```
+
+From a local checkout:
+
 ```sh
 cd ~/projects/stryke-postgres
-cargo build --release          # produces target/release/stryke-postgres-helper
-s pkg install -g .             # installs `postgres` and `postgres-build` CLIs
+cargo build --release          # produces target/release/libstryke_postgres.{dylib,so}
+s pkg install -g .             # cdylib lands in ~/.stryke/store/postgres@<version>/
 ```
 
 Or:
@@ -65,6 +73,11 @@ Or:
 ```sh
 make install
 ```
+
+The cdylib is dlopened in-process on first `use Postgres`. A
+`postgres::Client` cache keyed by connection URL is held in `OnceCell`
+— no fork-per-call, no fresh TCP+TLS+auth handshake. Honors
+`DATABASE_URL` and `POSTGRES_URL` env vars (`POSTGRES_DSN` for back-compat).
 
 ## [0x02] Quick start
 
