@@ -731,4 +731,32 @@ mod tests {
         assert!(!ptr.is_null());
         unsafe { stryke_free_cstring(ptr as *mut c_char) };
     }
+
+    /// `url_from_opts` precedence: explicit `url` opt wins over env vars
+    /// wins over host/port/user assembly. Pin so a future refactor that
+    /// swaps the precedence chain (env-first vs opts-first) gets caught
+    /// — opts-first matches the rest of stryke's convention.
+    #[test]
+    fn url_from_opts_explicit_url_wins_over_env_and_parts() {
+        std::env::remove_var("DATABASE_URL");
+        std::env::remove_var("POSTGRES_URL");
+        let u = url_from_opts(&json!({
+            "url": "postgresql://opts/db",
+            "host": "ignored.example",
+            "port": 9999,
+        }));
+        assert_eq!(u, "postgresql://opts/db");
+    }
+
+    /// Defaults when nothing is supplied: 127.0.0.1:5432, user=postgres,
+    /// empty password, empty database. Pin so a refactor that introduces
+    /// a different default (e.g. `localhost` vs `127.0.0.1`, which on
+    /// some systems go through different resolvers) gets caught.
+    #[test]
+    fn url_from_opts_assembled_form_uses_documented_defaults() {
+        std::env::remove_var("DATABASE_URL");
+        std::env::remove_var("POSTGRES_URL");
+        let u = url_from_opts(&json!({}));
+        assert_eq!(u, "postgresql://postgres@127.0.0.1:5432/");
+    }
 }
