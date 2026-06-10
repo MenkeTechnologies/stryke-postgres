@@ -42,10 +42,17 @@ fn url_from_opts(opts: &Value) -> String {
     if let Ok(u) = std::env::var("DATABASE_URL").or_else(|_| std::env::var("POSTGRES_URL")) {
         return u;
     }
-    let host = opts
+    let host_raw = opts
         .get("host")
         .and_then(|v| v.as_str())
         .unwrap_or("127.0.0.1");
+    // Same class of DSN-injection as the userinfo fix: a `host` value like
+    // `evil.example.com/?#@trusted-host` raw-interpolated into the DSN would
+    // re-anchor the authority component and silently redirect the connection.
+    // Reject host strings containing URL-meaningful characters. Hosts are
+    // hostnames or IP literals — none of `@`, `/`, `?`, `#`, `[`, `]`, ` `, `\\`
+    // belong there. IPv6 must use bracketed form e.g. `[::1]` which is allowed.
+    let host = sanitize_host(host_raw);
     let port = opts.get("port").and_then(|v| v.as_i64()).unwrap_or(5432);
     let user = opts
         .get("user")
@@ -69,6 +76,33 @@ fn url_from_opts(opts: &Value) -> String {
         port,
         percent_encode_userinfo(db)
     )
+}
+
+/// Reject host strings containing URL-meaningful chars that would re-anchor the
+/// DSN authority. Returns the cleaned host or "127.0.0.1" on rejection (safer to
+/// fail closed than to pass an injection through).
+fn sanitize_host(input: &str) -> String {
+    // IPv6 literal — `[...]` — is opaque to the URL parser; allow as-is when
+    // matched on both ends. Internal `[`/`]` outside that pattern is rejected.
+    if input.starts_with('[') && input.ends_with(']') && input.len() > 2 {
+        let inner = &input[1..input.len() - 1];
+        if !inner
+            .bytes()
+            .any(|b| matches!(b, b'@' | b'/' | b'?' | b'#' | b' ' | b'\\' | b'[' | b']'))
+        {
+            return input.to_string();
+        }
+        return "127.0.0.1".to_string();
+    }
+    if input.bytes().any(|b| {
+        matches!(
+            b,
+            b'@' | b'/' | b'?' | b'#' | b' ' | b'\\' | b'[' | b']' | b':'
+        )
+    }) {
+        return "127.0.0.1".to_string();
+    }
+    input.to_string()
 }
 
 /// RFC 3986 percent-encode for the URI userinfo component (and path segment).
@@ -1020,23 +1054,24 @@ mod tests {
     // `h`). A regression that adds host encoding would change the output and
     // this test would catch it for review.
     #[test]
-    fn url_host_field_interpolated_raw_dsn_injection_surface() {
+    fn url_host_field_dsn_injection_collapses_to_safe_fallback() {
+        // FIXED: a host containing DSN-meaningful chars (`/`, `?`, etc.) is now
+        // routed through `sanitize_host` which collapses to `127.0.0.1`. The
+        // original bug pinned the raw passthrough; this version asserts the
+        // injection target does NOT survive into the DSN.
         with_env(|| {
             let u = url_from_opts(&json!({
                 "host": "evil.com/?intercept=1",
                 "user": "u",
                 "database": "d",
             }));
-            // Pin the BUG: forward slash and question mark survive into the
-            // DSN unencoded. A fix that percent-encodes host would produce
-            // `evil.com%2F%3Fintercept%3D1` instead.
             assert!(
-                u.contains("evil.com/?intercept=1"),
-                "host-field raw passthrough not observed: {u}"
+                u.contains("@127.0.0.1:"),
+                "expected sanitized host to collapse to 127.0.0.1, got: {u}"
             );
             assert!(
-                !u.contains("evil.com%2F%3Fintercept%3D1"),
-                "host appears already-encoded — update test if fix landed: {u}"
+                !u.contains("evil.com") && !u.contains("intercept"),
+                "neither host nor query-string injection may survive: {u}"
             );
         });
     }
@@ -1133,5 +1168,59 @@ mod tests {
             validate_identifier("users\tevil", "table").is_err(),
             "tab must not pass identifier validation"
         );
+    }
+
+    /// `sanitize_host` must reject DSN-rewriting characters. A malicious
+    /// caller passing `host = "evil.com/?#@trusted-host"` would otherwise
+    /// re-anchor the URL authority and silently redirect the connection.
+    /// Pin: hosts with `@`/`/`/`?`/`#`/`:`/`[`/`]`/space/backslash collapse
+    /// to the safe fallback `127.0.0.1`.
+    #[test]
+    fn sanitize_host_rejects_dsn_redirect_payloads() {
+        assert_eq!(sanitize_host("evil.com/?#@trusted-host"), "127.0.0.1");
+        assert_eq!(sanitize_host("a@b"), "127.0.0.1");
+        assert_eq!(sanitize_host("a/b"), "127.0.0.1");
+        assert_eq!(sanitize_host("a?b"), "127.0.0.1");
+        assert_eq!(sanitize_host("a#b"), "127.0.0.1");
+        assert_eq!(sanitize_host("a:b"), "127.0.0.1");
+        assert_eq!(sanitize_host("evil host"), "127.0.0.1");
+        assert_eq!(sanitize_host("evil\\host"), "127.0.0.1");
+    }
+
+    /// Normal hostnames + IPv4 + bracketed IPv6 must pass through unchanged.
+    /// A blanket reject would break the documented use case.
+    #[test]
+    fn sanitize_host_accepts_normal_hosts_and_ipv6_literal() {
+        assert_eq!(sanitize_host("localhost"), "localhost");
+        assert_eq!(sanitize_host("db.example.com"), "db.example.com");
+        assert_eq!(sanitize_host("192.168.1.10"), "192.168.1.10");
+        assert_eq!(sanitize_host("[::1]"), "[::1]");
+        assert_eq!(sanitize_host("[2001:db8::1]"), "[2001:db8::1]");
+        // But bare IPv6 (no brackets) contains `:`, which is rejected — caller
+        // must supply the bracketed form to disambiguate from `host:port`.
+        assert_eq!(sanitize_host("::1"), "127.0.0.1");
+    }
+
+    /// `url_from_opts` must route the host through `sanitize_host`. End-to-end
+    /// check that an injection payload reaches the DSN as `127.0.0.1`, not
+    /// the redirect target.
+    #[test]
+    fn url_from_opts_host_injection_is_neutralized() {
+        with_env(|| {
+            let u = url_from_opts(&json!({
+                "host": "evil.example.com/?#@trusted-host",
+                "user": "u",
+                "password": "p",
+                "database": "d",
+            }));
+            assert!(
+                u.contains("@127.0.0.1:"),
+                "host injection must collapse to safe fallback, got: {u}"
+            );
+            assert!(
+                !u.contains("trusted-host") && !u.contains("evil.example.com"),
+                "neither injection target nor evil hostname may survive: {u}"
+            );
+        });
     }
 }
