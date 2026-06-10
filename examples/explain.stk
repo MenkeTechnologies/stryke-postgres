@@ -1,0 +1,46 @@
+#!/usr/bin/env stryke
+# examples/explain.stk — print EXPLAIN ANALYZE for a query the caller supplies.
+#
+# Reads $ARGV[0] as the SQL to explain, defaults to a built-in introspection
+# query against pg_class. Eval-guarded so missing PGURL just skips with a
+# clear message.
+#
+# Run:   s examples/explain.stk
+#        PGURL=postgresql://localhost/mydb s examples/explain.stk "SELECT * FROM users WHERE id = 42"
+
+use Postgres
+
+p "=== Postgres EXPLAIN tour ==="
+
+val $alive = eval { Postgres::ping() }
+unless ($alive) {
+    p "postgres not reachable — set PGURL or start postgres to exercise the demo"
+    exit 0
+}
+
+val $sql = $ARGV[0] // "SELECT relname, reltuples FROM pg_class WHERE relkind = 'r' ORDER BY reltuples DESC LIMIT 5"
+
+p "query: $sql"
+p ""
+
+# Plain EXPLAIN — shape only, no execution.
+p "── EXPLAIN (plan only) ──"
+var @plan = eval { Postgres::query("EXPLAIN " . $sql) }
+unless ($@) {
+    for val $row (@plan) {
+        p "  " . ($row->{"QUERY PLAN"} // to_json($row))
+    }
+}
+
+# Result preview — show what the query returns (no ANALYZE to avoid
+# write-modifying queries).
+p ""
+p "── result preview (first 5 rows) ──"
+var @result = eval { Postgres::query($sql) }
+unless ($@) {
+    val $n = scalar(@result)
+    for (var $i = 0; $i < ($n < 5 ? $n : 5); $i++) {
+        p "  " . to_json($result[$i])
+    }
+    p "  (total: $n row(s))"
+}
