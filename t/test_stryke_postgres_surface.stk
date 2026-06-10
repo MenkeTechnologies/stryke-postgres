@@ -1,0 +1,36 @@
+## t/test_stryke_postgres_surface.stk — wrapper-completeness pin.
+##
+## Asserts every public `fn X::Y::name` declared in lib/*.stk is
+## reachable via `use` at runtime. Uses `exists &X::Y::name` to
+## probe the symbol table without invoking the sub.
+##
+## Catches:
+##   * a wrapper sub deleted from lib/ but still referenced elsewhere
+##   * a sub-package file dropped from the install layout
+##   * `use Foo::Bar` failing to chase into lib/Bar.stk
+##   * an installed-package entry whose namespace bridge is broken
+##
+## Permission-free — no service, no creds, no live daemon. Private
+## helpers (`_` prefix) are implementation detail and are NOT
+## asserted, so refactoring internals stays free.
+
+use Postgres
+
+# ── Postgres.stk ──────────────────────────────────────────────
+assert_ok exists &Postgres::version, "Postgres::version exists"
+assert_ok exists &Postgres::server_version, "Postgres::server_version exists"
+assert_ok exists &Postgres::ping, "Postgres::ping exists"
+assert_ok exists &Postgres::databases, "Postgres::databases exists"
+assert_ok exists &Postgres::tables, "Postgres::tables exists"
+assert_ok exists &Postgres::schema, "Postgres::schema exists"
+assert_ok exists &Postgres::query, "Postgres::query exists"
+assert_ok exists &Postgres::query_one, "Postgres::query_one exists"
+assert_ok exists &Postgres::query_col, "Postgres::query_col exists"
+assert_ok exists &Postgres::query_scalar, "Postgres::query_scalar exists"
+assert_ok exists &Postgres::query_stream, "Postgres::query_stream exists"
+assert_ok exists &Postgres::dump, "Postgres::dump exists"
+assert_ok exists &Postgres::execute, "Postgres::execute exists"
+assert_ok exists &Postgres::exec_file, "Postgres::exec_file exists"
+assert_ok exists &Postgres::insert_many, "Postgres::insert_many exists"
+
+test_run
