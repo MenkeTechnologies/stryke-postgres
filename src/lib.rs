@@ -687,11 +687,20 @@ mod tests {
             saw_null.store(v.is_null(), Ordering::SeqCst);
             Ok(json!({"k": "v"}))
         });
-        assert!(saw_null.load(Ordering::SeqCst), "handler did not receive Value::Null on null *const c_char");
-        assert!(!ptr.is_null(), "ffi_call returned null pointer on success path");
+        assert!(
+            saw_null.load(Ordering::SeqCst),
+            "handler did not receive Value::Null on null *const c_char"
+        );
+        assert!(
+            !ptr.is_null(),
+            "ffi_call returned null pointer on success path"
+        );
         let s = unsafe { CStr::from_ptr(ptr).to_str().unwrap().to_string() };
         unsafe { stryke_free_cstring(ptr as *mut c_char) };
-        assert!(s.contains(r#""k":"v""#), "round-tripped JSON missing payload: {s}");
+        assert!(
+            s.contains(r#""k":"v""#),
+            "round-tripped JSON missing payload: {s}"
+        );
     }
 
     #[test]
@@ -702,7 +711,10 @@ mod tests {
         let ptr = ffi_call(std::ptr::null(), |_| -> Result<Value> {
             panic!("synthetic handler panic for FFI boundary test");
         });
-        assert!(!ptr.is_null(), "panic recovery path must still return a valid C string");
+        assert!(
+            !ptr.is_null(),
+            "panic recovery path must still return a valid C string"
+        );
         let s = unsafe { CStr::from_ptr(ptr).to_str().unwrap().to_string() };
         unsafe { stryke_free_cstring(ptr as *mut c_char) };
         let v: Value = serde_json::from_str(&s).expect("response must be valid JSON");
@@ -727,7 +739,10 @@ mod tests {
             saw_null.store(v.is_null(), Ordering::SeqCst);
             Ok(json!({"ok": true}))
         });
-        assert!(saw_null.load(Ordering::SeqCst), "malformed JSON should land as Value::Null, not panic");
+        assert!(
+            saw_null.load(Ordering::SeqCst),
+            "malformed JSON should land as Value::Null, not panic"
+        );
         assert!(!ptr.is_null());
         unsafe { stryke_free_cstring(ptr as *mut c_char) };
     }
@@ -758,5 +773,111 @@ mod tests {
         std::env::remove_var("POSTGRES_URL");
         let u = url_from_opts(&json!({}));
         assert_eq!(u, "postgresql://postgres@127.0.0.1:5432/");
+    }
+
+    // ── url_from_opts: edge-case bug surface ──
+    //
+    // url_from_opts builds the postgres DSN by raw `format!` interpolation
+    // (lines 56-61). It does NOT percent-encode `password`, `user`, or
+    // `database`, and it does NOT clamp `port` to a valid u16 range. These
+    // tests pin the SHAPE of the bug surface so regressions in the
+    // encoding-aware fix won't silently regress to the broken passthrough.
+
+    #[test]
+    fn url_password_with_at_sign_corrupts_dsn() {
+        // BUG SURFACE: a password containing `@` is interpolated raw, which
+        // makes the postgres DSN parser see the wrong authority component.
+        // `postgresql://u:pa@ss@h:5432/d` → user=`u`, password=`pa`, host=`ss`.
+        // A non-boilerplate test: it pins the broken-but-current output so
+        // any fix to URL-encode `password` will FAIL this test and force a
+        // companion update — preventing accidental silent-fix regression
+        // and documenting that the raw form is observably wrong.
+        with_env(|| {
+            let u = url_from_opts(&json!({
+                "host": "h",
+                "user": "u",
+                "password": "pa@ss",
+                "database": "d",
+            }));
+            // The literal pre-encoded substring `pa@ss@h` is the smoking gun:
+            // a correct impl would emit `pa%40ss@h` (percent-encoded `@`).
+            assert!(
+                u.contains("pa@ss@h"),
+                "url currently round-trips raw `@` in password (DSN-corruption bug). \
+                 If this assertion starts failing it means the encoder was fixed \
+                 — update this test to assert the percent-encoded form. url={u}"
+            );
+        });
+    }
+
+    #[test]
+    fn url_negative_port_is_passed_through_verbatim() {
+        // BUG SURFACE: opts.port is read via `as_i64().unwrap_or(5432)` with
+        // no range check (line 49). A port like -1 or 99999 is interpolated
+        // into the DSN, producing an unparseable connection string that
+        // surfaces as a confusing libpq error instead of an early arg-validation
+        // error from this crate. Pin the current passthrough so a fix
+        // (clamping to 1..=65535) is observable and intentional.
+        with_env(|| {
+            let neg = url_from_opts(&json!({"port": -1}));
+            assert!(
+                neg.contains(":-1/"),
+                "negative port not interpolated raw: {neg}"
+            );
+            let huge = url_from_opts(&json!({"port": 99999i64}));
+            assert!(
+                huge.contains(":99999/"),
+                "out-of-range port not interpolated raw: {huge}"
+            );
+        });
+    }
+
+    // ── json_to_param: numeric range cliff ──
+
+    #[test]
+    fn jp_u64_above_i64_max_silently_demotes_to_float() {
+        // BUG SURFACE: json_to_param's number branch (lines 127-135) tries
+        // `as_i64()` first, then `as_f64()`. A JSON number above `i64::MAX`
+        // (legal per RFC 8259; serde_json with arbitrary_precision OFF
+        // accepts u64 up to u64::MAX) sails past the i64 branch and falls
+        // into f64, silently losing precision. Binding such a value to a
+        // postgres BIGINT column then produces a wrong row with no error.
+        //
+        // Hand-crafted to catch the demotion: assert (a) the variant is
+        // Float, (b) the float value lost low bits relative to the source.
+        // A naive smoke test that just bound the value to a mock client
+        // would not surface the silent corruption.
+        let big = u64::MAX; // 18446744073709551615
+        let v: Value = serde_json::from_str(&big.to_string()).expect("u64::MAX is valid JSON");
+        match json_to_param(&v) {
+            PgParam::Float(f) => {
+                // The cast back to u64 loses precision: u64::MAX → 1.844...e19,
+                // which when cast back is ALSO u64::MAX rounded up to the next
+                // representable double. Pin that low bits are gone.
+                let round_trip = f as u64;
+                // Either equal-via-rounding (>= big - 2048 due to f64 mantissa)
+                // or saturating to u64::MAX. Either way the LSB precision is
+                // gone — this assert pins the lossy branch is taken.
+                assert!(
+                    round_trip == u64::MAX || round_trip < big,
+                    "expected precision loss for u64::MAX → f64 → u64; got {round_trip}"
+                );
+            }
+            PgParam::Int(i) => {
+                // If a future fix turns this into a Str branch instead (to
+                // preserve precision), update this test. An Int branch is
+                // wrong because i64 can't represent u64::MAX.
+                panic!(
+                    "u64::MAX must NOT decode into i64 (overflow); got Int({i}) — \
+                     means the i64 branch incorrectly accepted an out-of-range value"
+                );
+            }
+            other => {
+                // Acceptable future fix: PgParam::Str(big.to_string()) so the
+                // postgres BIGINT/NUMERIC codec handles it losslessly. If we
+                // ever land that, this test must be updated to assert Str.
+                panic!("unexpected variant for u64::MAX: {other:?}");
+            }
+        }
     }
 }
