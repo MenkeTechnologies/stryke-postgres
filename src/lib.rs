@@ -18,7 +18,7 @@ use std::os::raw::c_char;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, bail, Result};
 use once_cell::sync::OnceCell;
 use parking_lot::Mutex;
 use postgres::types::ToSql;
@@ -54,11 +54,71 @@ fn url_from_opts(opts: &Value) -> String {
     let password = opts.get("password").and_then(|v| v.as_str()).unwrap_or("");
     let db = opts.get("database").and_then(|v| v.as_str()).unwrap_or("");
     let auth = if password.is_empty() {
-        user.to_string()
+        percent_encode_userinfo(user)
     } else {
-        format!("{}:{}", user, password)
+        format!(
+            "{}:{}",
+            percent_encode_userinfo(user),
+            percent_encode_userinfo(password)
+        )
     };
-    format!("postgresql://{}@{}:{}/{}", auth, host, port, db)
+    format!(
+        "postgresql://{}@{}:{}/{}",
+        auth,
+        host,
+        port,
+        percent_encode_userinfo(db)
+    )
+}
+
+/// RFC 3986 percent-encode for the URI userinfo component (and path segment).
+/// Pre-fix, passwords containing `@`, `:`, `/`, `#`, `?` mangled the DSN —
+/// e.g. password `p@ss` would make `ss` the host. This encodes everything
+/// outside the unreserved set (`ALPHA / DIGIT / "-" / "." / "_" / "~"`).
+fn percent_encode_userinfo(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    for b in input.as_bytes() {
+        match *b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                out.push(*b as char);
+            }
+            other => {
+                out.push('%');
+                out.push_str(&format!("{:02X}", other));
+            }
+        }
+    }
+    out
+}
+
+/// Validate a SQL identifier (table or schema-qualified `schema.table`) for
+/// safe interpolation into `format!("... {table} ...")`. Postgres identifier
+/// rules: ALPHA / "_" first, then ALPHA / DIGIT / "_" / "$". We additionally
+/// allow `.` to permit `schema.table`. Pre-fix, a table param of
+/// `users; DROP TABLE users` was concatenated raw into `SELECT * FROM ...`
+/// enabling SQL injection.
+fn validate_identifier(name: &str, what: &str) -> Result<String> {
+    if name.is_empty() {
+        bail!("`{what}` must not be empty");
+    }
+    let valid_start = |c: char| c.is_ascii_alphabetic() || c == '_';
+    let valid_rest = |c: char| c.is_ascii_alphanumeric() || c == '_' || c == '$';
+    for (i, part) in name.split('.').enumerate() {
+        if part.is_empty() {
+            bail!("`{what}` has empty segment (position {i}) in `{name}`");
+        }
+        let mut chars = part.chars();
+        let first = chars.next().expect("non-empty checked above");
+        if !valid_start(first) {
+            bail!("`{what}` segment `{part}` must start with letter or underscore");
+        }
+        for c in chars {
+            if !valid_rest(c) {
+                bail!("`{what}` segment `{part}` contains invalid character `{c}`");
+            }
+        }
+    }
+    Ok(name.to_string())
 }
 
 fn with_client<F, R>(opts: &Value, f: F) -> Result<R>
@@ -347,11 +407,18 @@ fn op_exec(opts: Value) -> Result<Value> {
 }
 
 fn op_dump(opts: Value) -> Result<Value> {
-    let table = opts["table"]
-        .as_str()
-        .ok_or_else(|| anyhow!("missing table"))?
-        .to_string();
+    let table = validate_identifier(
+        opts["table"]
+            .as_str()
+            .ok_or_else(|| anyhow!("missing table"))?,
+        "table",
+    )?;
     let limit = opts["limit"].as_i64();
+    if let Some(n) = limit {
+        if n < 0 {
+            bail!("`limit` must be non-negative; got {n}");
+        }
+    }
     let sql = match limit {
         Some(n) => format!("SELECT * FROM {} LIMIT {}", table, n),
         None => format!("SELECT * FROM {}", table),
@@ -368,10 +435,12 @@ fn op_dump(opts: Value) -> Result<Value> {
 }
 
 fn op_insert_many(opts: Value) -> Result<Value> {
-    let table = opts["table"]
-        .as_str()
-        .ok_or_else(|| anyhow!("missing table"))?
-        .to_string();
+    let table = validate_identifier(
+        opts["table"]
+            .as_str()
+            .ok_or_else(|| anyhow!("missing table"))?,
+        "table",
+    )?;
     let rows = opts["rows"]
         .as_array()
         .ok_or_else(|| anyhow!("missing rows (array of objects)"))?
@@ -382,7 +451,10 @@ fn op_insert_many(opts: Value) -> Result<Value> {
     let first = rows[0]
         .as_object()
         .ok_or_else(|| anyhow!("first row must be an object"))?;
-    let cols: Vec<String> = first.keys().cloned().collect();
+    let cols: Vec<String> = first
+        .keys()
+        .map(|k| validate_identifier(k, "column"))
+        .collect::<Result<_>>()?;
     let col_list = cols.join(", ");
     let placeholders: Vec<String> = (1..=cols.len()).map(|i| format!("${}", i)).collect();
     let sql = format!(
@@ -784,14 +856,11 @@ mod tests {
     // encoding-aware fix won't silently regress to the broken passthrough.
 
     #[test]
-    fn url_password_with_at_sign_corrupts_dsn() {
-        // BUG SURFACE: a password containing `@` is interpolated raw, which
-        // makes the postgres DSN parser see the wrong authority component.
-        // `postgresql://u:pa@ss@h:5432/d` → user=`u`, password=`pa`, host=`ss`.
-        // A non-boilerplate test: it pins the broken-but-current output so
-        // any fix to URL-encode `password` will FAIL this test and force a
-        // companion update — preventing accidental silent-fix regression
-        // and documenting that the raw form is observably wrong.
+    fn url_password_with_at_sign_is_percent_encoded() {
+        // FIXED: passwords containing `@` are now percent-encoded so the
+        // postgres DSN parser sees the correct authority component.
+        // Pre-fix, `pa@ss` would split as user=`u`, password=`pa`, host=`ss`.
+        // Now: `pa%40ss` round-trips as the full password.
         with_env(|| {
             let u = url_from_opts(&json!({
                 "host": "h",
@@ -799,13 +868,13 @@ mod tests {
                 "password": "pa@ss",
                 "database": "d",
             }));
-            // The literal pre-encoded substring `pa@ss@h` is the smoking gun:
-            // a correct impl would emit `pa%40ss@h` (percent-encoded `@`).
             assert!(
-                u.contains("pa@ss@h"),
-                "url currently round-trips raw `@` in password (DSN-corruption bug). \
-                 If this assertion starts failing it means the encoder was fixed \
-                 — update this test to assert the percent-encoded form. url={u}"
+                u.contains("pa%40ss@h"),
+                "expected percent-encoded `@` in password, got: {u}"
+            );
+            assert!(
+                !u.contains("pa@ss@h"),
+                "raw `@` must not survive encoding (DSN-corruption regression): {u}"
             );
         });
     }
@@ -879,5 +948,51 @@ mod tests {
                 panic!("unexpected variant for u64::MAX: {other:?}");
             }
         }
+    }
+
+    /// `validate_identifier` must reject the classic SQL-injection payload
+    /// — anything with `;`, spaces, or quote characters. Pre-fix, a `table`
+    /// param of `users; DROP TABLE users` was raw-interpolated into
+    /// `SELECT * FROM {table}`, executing the DROP.
+    #[test]
+    fn validate_identifier_rejects_semicolon_drop_payload() {
+        assert!(validate_identifier("users; DROP TABLE users", "table").is_err());
+        assert!(validate_identifier("users -- comment", "table").is_err());
+        assert!(validate_identifier("\"users\"", "table").is_err());
+        assert!(validate_identifier("users'", "table").is_err());
+        assert!(validate_identifier("", "table").is_err());
+        assert!(
+            validate_identifier("1users", "table").is_err(),
+            "must start with letter or _"
+        );
+    }
+
+    /// `validate_identifier` must accept schema-qualified names so users can
+    /// dump from non-public schemas. A blanket "no `.`" reject would break
+    /// the documented `op_dump({"table": "analytics.events"})` shape.
+    #[test]
+    fn validate_identifier_accepts_schema_qualified_name() {
+        assert!(validate_identifier("analytics.events", "table").is_ok());
+        assert!(validate_identifier("_private.t1", "table").is_ok());
+        assert!(validate_identifier("a.b.c", "table").is_ok());
+        // Empty segment (leading/trailing/double dot) — rejected.
+        assert!(validate_identifier(".events", "table").is_err());
+        assert!(validate_identifier("analytics.", "table").is_err());
+        assert!(validate_identifier("a..b", "table").is_err());
+    }
+
+    /// `percent_encode_userinfo` must encode the URL-meaningful characters
+    /// that broke DSN parsing before this fix: `@` `:` `/` `?` `#`. A
+    /// password like `p@/ss` previously made `ss` the host; encoded it
+    /// becomes `p%40%2Fss` which postgres correctly decodes as the
+    /// password.
+    #[test]
+    fn percent_encode_userinfo_encodes_dsn_breakers() {
+        assert_eq!(percent_encode_userinfo("p@ss"), "p%40ss");
+        assert_eq!(percent_encode_userinfo("p/wd"), "p%2Fwd");
+        assert_eq!(percent_encode_userinfo("p:wd"), "p%3Awd");
+        assert_eq!(percent_encode_userinfo("p?q#f"), "p%3Fq%23f");
+        // Unreserved set passes through untouched.
+        assert_eq!(percent_encode_userinfo("aZ0-9_.~"), "aZ0-9_.~");
     }
 }
