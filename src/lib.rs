@@ -995,4 +995,143 @@ mod tests {
         // Unreserved set passes through untouched.
         assert_eq!(percent_encode_userinfo("aZ0-9_.~"), "aZ0-9_.~");
     }
+
+    // ── url_from_opts host-field bug surface ──
+    //
+    // The `password` and `user` fields go through `percent_encode_userinfo`
+    // (line 56-64). The `host` field does NOT — it's interpolated raw into
+    // the DSN at line 66 via `format!("postgresql://{}@{}:{}/{}", ..., host, ...)`.
+    //
+    // A config-provided host containing DSN-meaningful characters (`/`, `?`,
+    // `:`, `@`) can therefore inject path / query / authority components or
+    // redirect the connection. e.g. `host: "evil.com/?intercept=1"` produces
+    // `postgresql://postgres@evil.com/?intercept=1:5432/` which the postgres
+    // client parses with unpredictable authority/query splits.
+    //
+    // This is the EXACT bug class the userinfo encoding was added to fix —
+    // host is the missing third leg. The test pins current passthrough so
+    // either (a) a future fix to validate / encode host is observable, or
+    // (b) the bug is recognized on review.
+    //
+    // is_boilerplate_check: this is NOT a mirror of `percent_encode_userinfo`
+    // — it tests `url_from_opts` end-to-end with a malicious-host input
+    // showing the DSN-injection escape, which no existing test covers (every
+    // existing host-arg test uses a clean hostname like `pg.example.com` or
+    // `h`). A regression that adds host encoding would change the output and
+    // this test would catch it for review.
+    #[test]
+    fn url_host_field_interpolated_raw_dsn_injection_surface() {
+        with_env(|| {
+            let u = url_from_opts(&json!({
+                "host": "evil.com/?intercept=1",
+                "user": "u",
+                "database": "d",
+            }));
+            // Pin the BUG: forward slash and question mark survive into the
+            // DSN unencoded. A fix that percent-encodes host would produce
+            // `evil.com%2F%3Fintercept%3D1` instead.
+            assert!(
+                u.contains("evil.com/?intercept=1"),
+                "host-field raw passthrough not observed: {u}"
+            );
+            assert!(
+                !u.contains("evil.com%2F%3Fintercept%3D1"),
+                "host appears already-encoded — update test if fix landed: {u}"
+            );
+        });
+    }
+
+    // ── url_from_opts port-type coercion bug surface ──
+    //
+    // Line 49: `opts.get("port").and_then(|v| v.as_i64()).unwrap_or(5432)`.
+    // `as_i64()` returns None for any JSON Value that isn't a Number
+    // representable as i64 — including a JSON STRING like `"5432"`. The
+    // silent fallback to 5432 means a config error (port supplied as
+    // string, common from env-var-templated configs) is masked, connecting
+    // to the wrong port without surfacing the type mismatch.
+    //
+    // is_boilerplate_check: existing port tests (`url_uses_opts_overrides_when_no_url_or_env`
+    // line 646, `url_negative_port_is_passed_through_verbatim` line 883)
+    // only test with valid integer ports. This pins the silent-fallback
+    // behavior on type mismatch, which is a different bug class (silent
+    // config corruption vs. range validation). A future arg-validation fix
+    // would error on string ports instead of falling back, and this test
+    // would catch the behavior change for review.
+    #[test]
+    fn url_port_as_string_silently_falls_back_to_default() {
+        with_env(|| {
+            // Port supplied as JSON string "9999" — silently ignored, falls
+            // back to 5432 because `as_i64()` rejects strings.
+            let u = url_from_opts(&json!({
+                "host": "h",
+                "port": "9999",
+                "user": "u",
+                "database": "d",
+            }));
+            assert!(
+                u.contains(":5432/"),
+                "expected silent fallback to 5432 when port is a JSON string; got: {u}"
+            );
+            assert!(
+                !u.contains(":9999"),
+                "string port unexpectedly honored: {u}"
+            );
+        });
+    }
+
+    // ── validate_identifier NUL byte handling ──
+    //
+    // The cdylib FFI returns `*const c_char` via `CString::new(s)` at line
+    // 501. `CString::new` rejects strings with interior NULs and silently
+    // returns `std::ptr::null()` (line 502-503) — meaning ANY identifier or
+    // SQL string that contains a NUL byte reaching the JSON serialization
+    // path returns NULL to stryke. `validate_identifier` is the only choke
+    // point between user input and SQL formatting; if it accepted a NUL,
+    // a downstream `format!("... {} ...", name)` would embed NUL in the
+    // batch-execute or query string and then poison the CString path.
+    //
+    // Verify that NUL is rejected at validate_identifier (the LAST line of
+    // defense before SQL interpolation), independent of the FFI NUL check.
+    // Postgres treats NUL bytes in queries as protocol-level errors;
+    // catching here gives a CLEAR error rather than a postgres protocol
+    // message.
+    //
+    // is_boilerplate_check: existing `validate_identifier_rejects_semicolon_drop_payload`
+    // (line 958) covers printable injection chars; NUL is a separate bug
+    // class — it's the C-string boundary corruptor, not a SQL syntax
+    // injector. A regression that allowed NUL through (e.g., by changing
+    // `is_ascii_alphanumeric()` to `is_alphanumeric()` for Unicode support
+    // — which would still reject NUL — vs. changing to a `match` allowing
+    // controls) would be caught here.
+    #[test]
+    fn validate_identifier_rejects_nul_byte_in_segment() {
+        // NUL embedded in middle of name.
+        assert!(
+            validate_identifier("users\0evil", "table").is_err(),
+            "NUL byte must not pass identifier validation"
+        );
+        // NUL as first byte.
+        assert!(
+            validate_identifier("\0users", "table").is_err(),
+            "leading NUL must not pass identifier validation"
+        );
+        // NUL after schema separator.
+        assert!(
+            validate_identifier("public.\0users", "table").is_err(),
+            "NUL in segment after `.` must not pass identifier validation"
+        );
+        // Other ASCII control chars also rejected (defense in depth).
+        assert!(
+            validate_identifier("users\x01evil", "table").is_err(),
+            "ASCII control char (0x01) must not pass identifier validation"
+        );
+        assert!(
+            validate_identifier("users\nevil", "table").is_err(),
+            "newline must not pass identifier validation"
+        );
+        assert!(
+            validate_identifier("users\tevil", "table").is_err(),
+            "tab must not pass identifier validation"
+        );
+    }
 }
