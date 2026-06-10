@@ -1,0 +1,35 @@
+#!/usr/bin/env stryke
+# examples/discover.stk — minimum-viable tour of the `Postgres` package.
+#
+# Runs end-to-end in CI: eval-guarded `Postgres::ping` returns false-ish
+# when no postgres is up, the round-trip block skips, and the summary
+# still prints. With $PGURL pointing at a real server, the read-only
+# block exercises databases() + tables() so it has zero side effects.
+#
+# Run:   s examples/discover.stk
+#        PGURL=postgresql://user:pw@localhost/db s examples/discover.stk
+
+use Postgres
+
+p "=== Postgres discover ==="
+p "version: " . Postgres::version()
+p "PGURL:   " . ($ENV{PGURL} // "(default localhost:5432)")
+p ""
+
+val $alive = eval { Postgres::ping() }
+
+if ($alive) {
+    p "service: reachable — listing read-only metadata"
+    val @dbs = Postgres::databases()
+    p "  databases: " . scalar(@dbs) . " (" . join(", ", @dbs) . ")"
+    val @tbls = eval { Postgres::tables() }
+    p "  tables:    " . scalar(@tbls) . " in current db"
+} else {
+    p "service: not reachable — skipping live ops"
+    p ""
+    p "expected call shape when live:"
+    p "  val @dbs   = Postgres::databases()"
+    p "  val @tbls  = Postgres::tables()"
+    p "  val \$schema = Postgres::schema(\$table)"
+    p "  val @rows  = Postgres::query(\"SELECT * FROM users LIMIT 5\")"
+}
