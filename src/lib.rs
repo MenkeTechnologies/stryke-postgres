@@ -668,4 +668,67 @@ mod tests {
         assert!(params_from_value(&Value::Null).is_empty());
         assert!(params_from_value(&json!("scalar")).is_empty());
     }
+
+    // ── ffi_call ──
+    //
+    // These pin the FFI boundary contract: (a) null args must invoke the
+    // handler with `Value::Null` (not segfault on a wild deref), and (b) a
+    // panic inside the handler must be caught and surfaced as a JSON error
+    // string — otherwise it unwinds across the `extern "C"` boundary into
+    // the stryke runtime and aborts the whole shell process. Both bug
+    // classes are silent-corruption-not-test-failure, which is why a
+    // boilerplate "round-trip a known value" test would not catch them.
+
+    #[test]
+    fn ffi_call_null_args_passes_null_value_to_handler() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let saw_null = AtomicBool::new(false);
+        let ptr = ffi_call(std::ptr::null(), |v| {
+            saw_null.store(v.is_null(), Ordering::SeqCst);
+            Ok(json!({"k": "v"}))
+        });
+        assert!(saw_null.load(Ordering::SeqCst), "handler did not receive Value::Null on null *const c_char");
+        assert!(!ptr.is_null(), "ffi_call returned null pointer on success path");
+        let s = unsafe { CStr::from_ptr(ptr).to_str().unwrap().to_string() };
+        unsafe { stryke_free_cstring(ptr as *mut c_char) };
+        assert!(s.contains(r#""k":"v""#), "round-tripped JSON missing payload: {s}");
+    }
+
+    #[test]
+    fn ffi_call_catches_handler_panic_and_returns_error_json() {
+        // A panic that escapes ffi_call would unwind across `extern "C"`
+        // — undefined behavior — and tear down the host stryke process.
+        // The `catch_unwind` line is load-bearing; this test pins it.
+        let ptr = ffi_call(std::ptr::null(), |_| -> Result<Value> {
+            panic!("synthetic handler panic for FFI boundary test");
+        });
+        assert!(!ptr.is_null(), "panic recovery path must still return a valid C string");
+        let s = unsafe { CStr::from_ptr(ptr).to_str().unwrap().to_string() };
+        unsafe { stryke_free_cstring(ptr as *mut c_char) };
+        let v: Value = serde_json::from_str(&s).expect("response must be valid JSON");
+        let err = v.get("error").and_then(|e| e.as_str()).unwrap_or("");
+        assert!(
+            err.contains("panicked"),
+            "expected panic surfaced as error JSON, got: {s}"
+        );
+    }
+
+    #[test]
+    fn ffi_call_malformed_json_input_falls_back_to_null_not_panic() {
+        // ffi_call uses `unwrap_or(Value::Null)` on the parse — a regression
+        // to `unwrap()` would turn every malformed call into a stryke-wide
+        // crash. Construct an explicit garbage CString to exercise the
+        // serde_json fallback branch (the `*const c_char` path, not the
+        // null-pointer path).
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let garbage = CString::new("{not valid json").unwrap();
+        let saw_null = AtomicBool::new(false);
+        let ptr = ffi_call(garbage.as_ptr(), |v| {
+            saw_null.store(v.is_null(), Ordering::SeqCst);
+            Ok(json!({"ok": true}))
+        });
+        assert!(saw_null.load(Ordering::SeqCst), "malformed JSON should land as Value::Null, not panic");
+        assert!(!ptr.is_null());
+        unsafe { stryke_free_cstring(ptr as *mut c_char) };
+    }
 }
