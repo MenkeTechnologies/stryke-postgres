@@ -28,9 +28,7 @@ binary so the daily-driver install stays slim.
 - [\[0x00\] Why this is a package, not a builtin](#0x00-why-this-is-a-package-not-a-builtin)
 - [\[0x01\] Install](#0x01-install)
 - [\[0x02\] Quick start](#0x02-quick-start)
-- [\[0x03\] CLI: `postgres`](#0x03-cli-postgres)
 - [\[0x04\] API reference](#0x04-api-reference)
-- [\[0x05\] Helper protocol](#0x05-helper-protocol)
 - [\[0x06\] Type encoding](#0x06-type-encoding)
 - [\[0x07\] Bind parameters](#0x07-bind-parameters)
 - [\[0x08\] Tests](#0x08-tests)
@@ -48,9 +46,10 @@ transitive crates (TLS, async runtime, type encoders). Most stryke
 one-liners never touch Postgres; for the ones that do, opt in with this
 package.
 
-`stryke-postgres` ships as a thin stryke library plus a Rust helper binary
-(`stryke-postgres-helper`) built from this repo. The stryke side spawns the
-helper per call and parses NDJSON over a pipe.
+`stryke-postgres` ships as a thin stryke library plus a Rust cdylib
+(`libstryke_postgres.{dylib,so}`) built from this repo. The cdylib is
+dlopened in-process on first `use Postgres`; each `Postgres::*` wrapper
+calls a `pg__*` export with a JSON args dict and decodes the JSON reply.
 
 ## [0x01] Install
 
@@ -77,15 +76,15 @@ make install
 The cdylib is dlopened in-process on first `use Postgres`. A
 `postgres::Client` cache keyed by connection URL is held in `OnceCell`
 — no fork-per-call, no fresh TCP+TLS+auth handshake. Honors
-`DATABASE_URL` and `POSTGRES_URL` env vars (`POSTGRES_DSN` for back-compat).
+`DATABASE_URL` and `POSTGRES_URL` env vars.
 
 ## [0x02] Quick start
 
 ```stryke
 use Postgres
 
-# Set $POSTGRES_DSN once, omit the named arg everywhere.
-$ENV{POSTGRES_DSN} = "postgres://wizard@127.0.0.1:5432/app"
+# Set $DATABASE_URL once, omit the named arg everywhere.
+$ENV{DATABASE_URL} = "postgres://wizard@127.0.0.1:5432/app"
 
 # Single scalar.
 p Postgres::query_scalar "SELECT COUNT(*) FROM users"
@@ -99,60 +98,28 @@ my @rows = Postgres::query "SELECT id, name FROM users WHERE created_at > \$1",
 Postgres::query_stream "SELECT * FROM big_table",
     callback => sub ($row) { process $row }
 
-# Write paths return { affected_rows }.
+# Write paths return { affected }.
 my $r = Postgres::execute "UPDATE users SET name = \$1 WHERE id = \$2",
                           bind => ["alice", 42]
-p "updated $r->{affected_rows}"
+p "updated $r->{affected}"
 
 # Bulk insert (array of hashes; columns inferred from first row's keys).
+# Returns the inserted-row count.
 Postgres::insert_many "users",
     [{ name => "x", score => 1, meta => { color => "blue" } },
      { name => "y", score => 2, meta => { color => "red"  } }]
-
-# RETURNING for generated IDs.
-my @rows = Postgres::insert_many "users",
-    [{ name => "z" }],
-    returning => "id, name"
 
 # Schema introspection.
 p to_json Postgres::schema "users"
 p Postgres::tables |> ep
 ```
 
-DSN sources (priority order):
+Connection sources (priority order):
 
-1. `dsn => "postgres://user:pass@host:port/db"` named arg
-2. `$ENV{POSTGRES_DSN}` (or `$ENV{DATABASE_URL}`)
-3. Individual flags: `host`, `port`, `user`, `password`, `database`
-
-## [0x03] CLI: `postgres`
-
-```sh
-postgres query   'SELECT * FROM users WHERE id = $1' --bind='[42]'
-postgres execute 'UPDATE users SET active = true WHERE id = $1' --bind='[42]'
-postgres exec   --file=migrate.sql
-postgres dump   --table=users --where='active = true' --order-by=id --limit=100
-postgres tables [--schema=myschema]
-postgres databases
-postgres schema --table=users [--schema=myschema]
-postgres ping
-postgres build                              # `cargo build --release`
-postgres version
-```
-
-Connection flags (also accept env vars):
-
-```
---dsn URL              $POSTGRES_DSN
---database-url URL     $DATABASE_URL    (libpq convention; equivalent)
---host H               $POSTGRES_HOST
---port P               $POSTGRES_PORT
---user U               $POSTGRES_USER
---password PW          $POSTGRES_PASSWORD
---database D           $POSTGRES_DATABASE
---application-name N   (default: stryke-postgres-helper)
---connect-timeout SECONDS
-```
+1. `url => "postgres://user:pass@host:port/db"` named arg
+2. Individual named args: `host`, `port`, `user`, `password`, `database`
+3. `$ENV{DATABASE_URL}` (or `$ENV{POSTGRES_URL}`) when neither `url` nor
+   `host` is given
 
 ## [0x04] API reference
 
@@ -167,70 +134,33 @@ Postgres::query_scalar $sql, %opts → $value | undef
 Postgres::dump         $table, %opts → @rows
 ```
 
-`%opts` keys: `dsn`, `host`, `port`, `user`, `password`, `database`,
-`application_name`, `connect_timeout`, `bind`, `columnar`, `with_meta`,
-`limit`, `callback` (stream only). `bind` is an arrayref (positional `$1`,
-`$2`, …).
+`%opts` keys: `url`, `host`, `port`, `user`, `password`, `database`,
+`bind`, `limit` (dump only), `callback` (stream only). `bind` is an
+arrayref (positional `$1`, `$2`, …).
 
 ### Write paths
 
 ```stryke
-Postgres::execute     $sql, %opts → { affected_rows }
-Postgres::exec_file   $path, %opts → [{ affected_rows }, ...]
-Postgres::insert_many $table, $rows_aref, %opts → { affected_rows }
-                                                 | @rows (when returning => "...")
+Postgres::execute     $sql, %opts → { affected }
+Postgres::exec_file   $path, %opts → per-script result
+Postgres::insert_many $table, $rows_aref, %opts → $inserted_count
 ```
-
-`insert_many` accepts `returning => "id, name, …"` to fetch generated
-columns. Without it you get an `{affected_rows}` hash; with it you get the
-row list.
 
 ### Metadata
 
 ```stryke
-Postgres::ping       %opts → 1 | ""
-Postgres::tables     %opts → @names           # opts.schema overrides current_schema()
+Postgres::ping       %opts → 1 | 0
+Postgres::tables     %opts → @names
 Postgres::databases  %opts → @names
-Postgres::schema     $table, %opts → { table, schema, columns => [...], indexes => [...] }
+Postgres::schema     $table, %opts → column metadata for $table
 ```
 
-### Helper plumbing
+### Versions
 
 ```stryke
-Postgres::helper_path()   → $abs_path
-Postgres::ensure_built()  → $abs_path     # cargo-builds if missing
-Postgres::version()       → "stryke-postgres-helper X.Y.Z"
+Postgres::version()              → package version string
+Postgres::server_version(%opts)  → Postgres `version()` build string
 ```
-
-## [0x05] Helper protocol
-
-```sh
-stryke-postgres-helper --dsn 'postgres://…' query 'SELECT * FROM t WHERE id = $1' --bind '[42]'
-stryke-postgres-helper --dsn 'postgres://…' execute 'UPDATE …' --bind '["x", 1]'
-stryke-postgres-helper --dsn 'postgres://…' exec --file migrate.sql
-stryke-postgres-helper --dsn 'postgres://…' schema --table users
-stryke-postgres-helper --dsn 'postgres://…' ping
-```
-
-Output:
-
-* `query` → NDJSON rows on stdout. `--columnar` emits one `{columns, rows}`
-  object. `--with-meta` prepends a `{"meta":{columns:[...]}}` line.
-* `execute` → `{affected_rows}`
-* `exec` → array of per-statement objects
-* `schema` → `{table, schema, columns:[...], indexes:[...]}`
-* `tables`, `databases` → NDJSON `{"name": ...}`
-* `ping` → `ok` on stdout, exit 0; non-zero on failure
-
-### Persistent serve mode (experimental)
-
-```sh
-stryke-postgres-helper --dsn 'postgres://…' serve --socket-path /tmp/sp.sock &
-```
-
-JSON-RPC over a Unix socket: each line is `{"id":N,"method":"query|execute|ping|close","params":{...}}`.
-The connection is reused across requests. The stryke side's persistent-connect
-API will pick this up once stryke gains a Unix-socket client builtin.
 
 ## [0x06] Type encoding
 
@@ -240,19 +170,14 @@ PostgreSQL → JSON encoding:
 |---|---|---|
 | `bool` | bool | |
 | `int2`, `int4`, `int8` | number | |
-| `oid` | number | |
 | `float4`, `float8` | number | |
-| `numeric` | string | text-cast to preserve precision |
-| `text`, `varchar`, `bpchar`, `name`, `char` | string | |
-| `bytea` | string | UTF-8 if valid; otherwise `"base64:…"` |
+| `text`, `varchar`, `bpchar`, `name` | string | |
 | `date` | `"YYYY-MM-DD"` | |
-| `time` | `"HH:MM:SS.ffffff"` | |
-| `timestamp` | `"YYYY-MM-DD HH:MM:SS.ffffff"` | |
+| `timestamp` | `"YYYY-MM-DD HH:MM:SS[.ffffff]"` | |
 | `timestamptz` | RFC 3339 | |
 | `uuid` | string | |
 | `json`, `jsonb` | preserved as JSON | |
-| array types (`int4[]`, `text[]`, …) | array | element-wise |
-| other | string | falls back to text representation |
+| other | string | text fallback; null when no text conversion exists |
 | `NULL` | null | |
 
 ## [0x07] Bind parameters
@@ -267,26 +192,25 @@ Postgres::query  'SELECT $1::text || $2::text AS r',     bind => ["a", "b"]
 Postgres::execute 'INSERT INTO t (data) VALUES ($1)',    bind => [{x => 1}]   # jsonb
 ```
 
-The helper's `BindVal` narrows JSON ints to whatever the inferred column
-type expects (int2/int4/int8/float4/float8/numeric/text) so casts aren't
-strictly required for INSERT into a typed column — only for expressions
-where Postgres can't infer.
+The cdylib's `json_to_param` maps JSON binds to wire values: null → NULL,
+bool → bool, int → `i64`, float → `f64`, string → text, array/object →
+jsonb. Add explicit casts for expressions where Postgres can't infer the
+type from context.
 
 ## [0x08] Tests
 
 ```sh
 cargo test                                       # unit + contract tests, no live calls
-POSTGRES_DSN='postgres://…' s test t/            # end-to-end against live Postgres
+DATABASE_URL='postgres://…' s test t/            # end-to-end against live Postgres
 ```
 
-The end-to-end suite skips cleanly when `$POSTGRES_DSN` is unset or the
-helper isn't built.
+The end-to-end suite skips cleanly when none of `$DATABASE_URL`,
+`$POSTGRES_URL`, `$POSTGRES_DSN` points at a reachable server.
 
 ## [0x09] Dev workflow
 
 ```sh
 make             # release build
-make debug       # faster compile
 make test        # cargo test + s test t/
 make install     # release + pkg install -g .
 make clean
@@ -296,21 +220,22 @@ make clean
 
 ```
 stryke-postgres/
-  stryke.toml                    # stryke package manifest
-  Cargo.toml                     # Rust helper crate manifest
+  stryke.toml                    # stryke package manifest ([ffi] table)
+  Cargo.toml                     # cdylib crate manifest
   Makefile
-  src/main.rs                    # stryke-postgres-helper binary
+  src/lib.rs                     # cdylib — pg__* extern "C" exports + client cache
   lib/
     Postgres.stk                 # `use Postgres`
-  bin/
-    postgres.stk                 # `postgres` CLI
-    postgres-build.stk
   t/
-    test_postgres.stk            # end-to-end (gated on $POSTGRES_DSN)
+    test_postgres.stk            # end-to-end (gated on $DATABASE_URL)
+    test_stryke_postgres_surface.stk
+  tests/                         # Rust contract test + repo lint gates
   examples/
     quick_query.stk
     bulk_load.stk
+    discover.stk
     dump_table.stk
+    explain.stk
   .github/workflows/
     ci.yml                       # cargo check/test + live-pg smoke
     release.yml                  # cross-compile + GH release on tag push
