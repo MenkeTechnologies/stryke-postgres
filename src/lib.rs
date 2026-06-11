@@ -1201,6 +1201,148 @@ mod tests {
         assert_eq!(sanitize_host("::1"), "127.0.0.1");
     }
 
+    // ── validate_identifier: `$` placement asymmetry ──
+    //
+    // `valid_start` (line 138) is `is_ascii_alphabetic() || '_'` — `$` is NOT
+    // a legal first char. `valid_rest` (line 139) is
+    // `is_ascii_alphanumeric() || '_' || '$'` — `$` IS legal in non-first
+    // position. Postgres' own lexer matches this (a `$`-leading token is a
+    // dollar-quote / positional-param marker, not an identifier). No existing
+    // test exercises `$`: `validate_identifier_rejects_semicolon_drop_payload`
+    // (line 992) covers `;`/quotes/leading-digit and
+    // `validate_identifier_accepts_schema_qualified_name` (line 1008) covers
+    // `.`. This pins the asymmetry so a refactor that folds `$` into
+    // `valid_start` (accepting `$tab`) — or drops it from `valid_rest`
+    // (rejecting the legal `tab$1`) — is caught.
+    //
+    // is_boilerplate_check: not a smoke "valid name passes" test — it asserts
+    // BOTH directions of a position-dependent character rule (accept mid,
+    // reject leading) plus the per-segment application across a `.`, which is
+    // where an off-by-one in the `chars.next()`/`for c in chars` split (lines
+    // 144-149) would surface.
+    #[test]
+    fn validate_identifier_dollar_legal_only_in_non_first_position() {
+        // `$` legal as a non-first char.
+        assert!(
+            validate_identifier("tab$1", "table").is_ok(),
+            "`$` must be accepted in non-first position"
+        );
+        assert!(
+            validate_identifier("a1$_2", "col").is_ok(),
+            "`$` mixed with alnum/underscore in rest must pass"
+        );
+        // `$` illegal as the FIRST char of a segment.
+        assert!(
+            validate_identifier("$tab", "table").is_err(),
+            "leading `$` must be rejected"
+        );
+        // Per-segment: legal-rest `$` in the second segment must still pass,
+        // and a leading `$` in any segment (not just the first) must fail —
+        // proves the start/rest split is re-applied for every dotted segment.
+        assert!(
+            validate_identifier("schema.tab$1", "table").is_ok(),
+            "`$` in non-first position of a later segment must pass"
+        );
+        assert!(
+            validate_identifier("schema.$tab", "table").is_err(),
+            "leading `$` in a later segment must be rejected per-segment"
+        );
+    }
+
+    // ── op_dump: limit-guard fires before any connection ──
+    //
+    // `op_dump` (line 443) validates `table` (line 444) and rejects a negative
+    // `limit` (line 451-455) BEFORE reaching `with_client` (line 460). Both
+    // are pure arg-validation paths that need no live server, so they are
+    // unit-testable here. The negative-limit guard exists because the limit is
+    // raw-`format!`-interpolated into `LIMIT {n}` (line 457) — a negative or
+    // injected value would otherwise reach the SQL string. No existing test
+    // touches `op_dump`.
+    //
+    // is_boilerplate_check: this is an error-mapping + ordering test — it
+    // proves the validation short-circuits BEFORE network I/O (a server-less
+    // CI box would hang/error differently if the guard ran after connect),
+    // and pins the exact off-by-one boundary: `-1` rejected, `0` accepted
+    // (0 is non-negative, so it passes the guard and would build `LIMIT 0`).
+    #[test]
+    fn op_dump_rejects_negative_limit_before_connecting() {
+        with_env(|| {
+            // Negative limit → Err from the pure guard, never connects.
+            let err = op_dump(json!({"table": "users", "limit": -1}))
+                .expect_err("negative limit must be rejected");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("limit") && msg.contains("-1"),
+                "expected negative-limit arg error, got: {msg}"
+            );
+        });
+    }
+
+    #[test]
+    fn op_dump_rejects_invalid_table_before_connecting() {
+        with_env(|| {
+            // Injection table name → validate_identifier Err, never connects.
+            let err = op_dump(json!({"table": "users; DROP TABLE x"}))
+                .expect_err("injection table must be rejected");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("table"),
+                "expected table validation error, got: {msg}"
+            );
+            // Missing table key → "missing table" Err, also pre-connect.
+            assert!(
+                op_dump(json!({})).is_err(),
+                "missing table must error before connecting"
+            );
+        });
+    }
+
+    // ── op_insert_many: empty-rows invariant + pre-connect column guard ──
+    //
+    // `op_insert_many` (line 471) short-circuits on an empty `rows` array
+    // (line 482-484) returning `{"inserted": 0}` WITHOUT building SQL or
+    // connecting. It also validates every column key (line 488-491) before
+    // `with_client` (line 500). No existing test touches `op_insert_many`.
+    //
+    // is_boilerplate_check: the empty-rows case is the classic off-by-one /
+    // empty-input invariant — a regression that dropped the `is_empty()` guard
+    // would index `rows[0]` (line 485) and PANIC on `[]`, or build
+    // `VALUES ()` with zero placeholders. The column-injection case proves the
+    // identifier guard is applied to map KEYS (a distinct code path from the
+    // `table` value), and that it fires before any network I/O on a
+    // server-less box.
+    #[test]
+    fn op_insert_many_empty_rows_returns_zero_without_connecting() {
+        with_env(|| {
+            // No live server: this must NOT connect. It returns inserted:0.
+            let out = op_insert_many(json!({"table": "users", "rows": []}))
+                .expect("empty rows is a no-op success, not an error");
+            assert_eq!(
+                out,
+                json!({"inserted": 0}),
+                "empty rows must early-return inserted:0 without connecting"
+            );
+        });
+    }
+
+    #[test]
+    fn op_insert_many_rejects_injection_column_key_before_connecting() {
+        with_env(|| {
+            // A malicious COLUMN NAME (map key) must be rejected by
+            // validate_identifier before any SQL is built or connection opened.
+            let err = op_insert_many(json!({
+                "table": "users",
+                "rows": [{"id": 1, "name); DROP TABLE users; --": "x"}],
+            }))
+            .expect_err("injection column key must be rejected");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("column"),
+                "expected column validation error, got: {msg}"
+            );
+        });
+    }
+
     /// `url_from_opts` must route the host through `sanitize_host`. End-to-end
     /// check that an injection payload reaches the DSN as `127.0.0.1`, not
     /// the redirect target.
