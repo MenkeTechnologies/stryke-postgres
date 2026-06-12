@@ -63,6 +63,72 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --locked --no-fail-fast
 
+  # Build the cdylib, install the package, and run the t/ stryke suite
+  # against an ephemeral postgres service so the live assertions actually
+  # execute. This is the only job that exercises the lib/*.stk wrapper
+  # logic (query/count/exists/upsert/insert_many/update/delete/…); cargo
+  # test only covers the Rust cdylib. The stryke binary is pulled from
+  # strykelang's latest release — no rustup/cargo-install of stryke.
+  stryke-test:
+    name: Stryke .stk suite
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+          POSTGRES_DB: stryketest
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build cdylib
+        run: cargo build --release --locked
+      - name: Install stryke from latest GitHub release
+        run: |
+          set -euo pipefail
+          TAG=$(gh release view --repo MenkeTechnologies/strykelang \
+              --json tagName --jq '.tagName')
+          ASSET="stryke-${TAG}-x86_64-unknown-linux-gnu.tar.gz"
+          gh release download "${TAG}" --repo MenkeTechnologies/strykelang \
+              --pattern "${ASSET}" --output /tmp/stryke.tar.gz
+          mkdir -p "${HOME}/.local/bin"
+          tar -C "${HOME}/.local/bin" -xzf /tmp/stryke.tar.gz
+          chmod +x "${HOME}/.local/bin"/{stryke,st,s} 2>/dev/null || true
+          echo "${HOME}/.local/bin" >> "$GITHUB_PATH"
+          stryke --version
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Syntax-check every .stk file
+        run: |
+          set -uo pipefail
+          fail=0
+          for f in lib/*.stk t/*.stk examples/*.stk; do
+              [[ -f "$f" ]] || continue
+              out=$(stryke -c "$f" 2>&1)
+              if [[ "$out" == *"syntax OK"* ]]; then
+                  echo "OK   $f"
+              else
+                  echo "FAIL $f"
+                  printf '%s\n' "$out" | head -5 | sed 's/^/        /'
+                  fail=1
+              fi
+          done
+          exit $fail
+      - name: Install package + run t/ suite
+        run: |
+          s pkg install -g .
+          s test t/
+        env:
+          DATABASE_URL: postgres://postgres@127.0.0.1:5432/stryketest
+
   doc:
     name: Doc
     runs-on: ubuntu-latest
