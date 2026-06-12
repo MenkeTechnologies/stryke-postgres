@@ -202,8 +202,14 @@ Postgres::tables       %opts → @names
 Postgres::databases    %opts → @names
 Postgres::schema       $table, %opts → column metadata for $table
 Postgres::count        $table, $where?, %opts → $row_count    # SELECT count(*) [WHERE $where]
+Postgres::exists       $table, $where?, %opts → 1 | 0         # SELECT EXISTS(…) — short-circuits
 Postgres::table_exists $name, %opts → 1 | 0                   # $name must be a plain identifier
 ```
+
+`count` and `exists` interpolate the table name and `$where`; pass binds
+in `%opts{bind}` (e.g. `exists "t", "id = $1", bind => [42]`). `exists`
+uses SQL `EXISTS`, which stops at the first matching row — prefer it over
+`count(…) > 0` when you only need a yes/no.
 
 ### Versions
 

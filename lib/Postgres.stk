@@ -297,9 +297,15 @@ fn Postgres::count ($table, $where = undef, %opts) {
     val $sql = defined($where) && length($where)
         ? "SELECT count(*) AS n FROM $table WHERE $where"
         : "SELECT count(*) AS n FROM $table"
-    var @fwd = Postgres::_conn(\%opts)
-    push @fwd, bind => $opts{bind} if defined $opts{bind}
-    Postgres::query_scalar($sql, @fwd) + 0
+    # The bind pair is passed as an inline literal in the call expression,
+    # NOT accumulated into an array variable first: stryke drops an
+    # arrayref-valued pair when a forwarded array variable is flattened into
+    # a store-loaded package fn (see strykelang BUG-307), which silently sent
+    # zero params and tripped "expected N parameters but got 0".
+    val $n = defined($opts{bind})
+        ? Postgres::query_scalar($sql, Postgres::_conn(\%opts), bind => $opts{bind})
+        : Postgres::query_scalar($sql, Postgres::_conn(\%opts))
+    $n + 0
 }
 
 ## True if a table named $name exists in the current database. $name must
@@ -314,6 +320,18 @@ fn Postgres::table_exists ($name, %opts) {
     Postgres::query_scalar(
         "SELECT count(*) FROM information_schema.tables WHERE table_name = '$name'",
         Postgres::_conn(\%opts)) > 0 ? 1 : 0
+}
+
+## True if at least one row in $table matches $where (or any row exists
+## when $where is omitted). Uses SQL EXISTS, which short-circuits at the
+## first match — cheaper than count(*) > 0 on a large table. The table name
+## and $where are interpolated; pass trusted values (binds via %opts{bind}).
+fn Postgres::exists ($table, $where = undef, %opts) {
+    val $cond = defined($where) && length($where) ? " WHERE $where" : ""
+    val $sql = "SELECT EXISTS(SELECT 1 FROM $table$cond) AS e"
+    defined($opts{bind})
+        ? Postgres::query_scalar($sql, Postgres::_conn(\%opts), bind => $opts{bind}) ? 1 : 0
+        : Postgres::query_scalar($sql, Postgres::_conn(\%opts)) ? 1 : 0
 }
 
 ## TRUNCATE $table (optionally RESTART IDENTITY when restart_identity is

@@ -93,6 +93,11 @@ if ($alive) {
     assert_eq Postgres::count($tbl, "name = 'alice'", url => $dsn), 1, "count honors a WHERE clause"
     assert_ok  Postgres::table_exists($tbl, url => $dsn), "table_exists true for our table"
     assert_ok !Postgres::table_exists("nope_$$", url => $dsn), "table_exists false for an absent table"
+    assert_ok  Postgres::exists($tbl, undef, url => $dsn), "exists: true when the table has rows"
+    assert_ok  Postgres::exists($tbl, "name = 'alice'", url => $dsn), "exists: true for a matching WHERE"
+    assert_ok !Postgres::exists($tbl, "name = 'nobody'", url => $dsn), "exists: false for a non-matching WHERE"
+    assert_ok  Postgres::exists($tbl, "name = \$1", url => $dsn, bind => ["alice"]), "exists: honors a bind param"
+    assert_ok !Postgres::exists($tbl, "name = \$1", url => $dsn, bind => ["nobody"]), "exists: bind param, no match"
 
     # ── transaction: commit path ─────────────────────────────────────
     Postgres::transaction(fn {

@@ -39,6 +39,7 @@ assert_ok exists &Postgres::rollback, "Postgres::rollback exists"
 assert_ok exists &Postgres::transaction, "Postgres::transaction exists"
 assert_ok exists &Postgres::count, "Postgres::count exists"
 assert_ok exists &Postgres::table_exists, "Postgres::table_exists exists"
+assert_ok exists &Postgres::exists, "Postgres::exists exists"
 assert_ok exists &Postgres::truncate, "Postgres::truncate exists"
 
 test_run
