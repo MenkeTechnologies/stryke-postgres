@@ -118,6 +118,51 @@ if ($alive) {
     Postgres::truncate($tbl, url => $dsn)
     assert_eq Postgres::count($tbl, undef, url => $dsn), 0, "truncate empties the table"
 
+    # ── upsert: insert, update-on-conflict, DO NOTHING, RETURNING ─────
+    val $kv = "stryke_pg_upsert_$$"
+    Postgres::execute("DROP TABLE IF EXISTS $kv", url => $dsn)
+    Postgres::execute("CREATE TABLE $kv (id INT PRIMARY KEY, name TEXT, hits INT)", url => $dsn)
+
+    # first call inserts (integer bind against an INT4 column)
+    assert_eq Postgres::upsert($kv, { id => 1, name => "a", hits => 1 },
+        conflict => ["id"], url => $dsn), 1, "upsert: insert path affected=1"
+    assert_eq Postgres::query_scalar("SELECT hits FROM $kv WHERE id = 1", url => $dsn), 1,
+        "upsert: inserted value present"
+
+    # conflicting call updates all non-key columns by default
+    Postgres::upsert($kv, { id => 1, name => "A", hits => 9 }, conflict => ["id"], url => $dsn)
+    val $r = Postgres::query_one("SELECT name, hits FROM $kv WHERE id = 1", url => $dsn)
+    assert_eq $r->{name}, "A", "upsert: default update overwrote name"
+    assert_eq $r->{hits}, 9, "upsert: default update overwrote hits"
+
+    # explicit update list touches only the named columns
+    Postgres::upsert($kv, { id => 1, name => "ignored", hits => 42 },
+        conflict => ["id"], update => ["hits"], url => $dsn)
+    val $r2 = Postgres::query_one("SELECT name, hits FROM $kv WHERE id = 1", url => $dsn)
+    assert_eq $r2->{name}, "A", "upsert: explicit update kept name"
+    assert_eq $r2->{hits}, 42, "upsert: explicit update bumped hits"
+
+    # empty update list = DO NOTHING — the conflicting row is left untouched
+    Postgres::upsert($kv, { id => 1, name => "nope", hits => 0 },
+        conflict => ["id"], update => [], url => $dsn)
+    assert_eq Postgres::query_scalar("SELECT hits FROM $kv WHERE id = 1", url => $dsn), 42,
+        "upsert: DO NOTHING left the row unchanged"
+
+    # RETURNING gives the affected rows back
+    val @ret = Postgres::upsert($kv, { id => 2, name => "b", hits => 5 },
+        conflict => ["id"], returning => "id,name", url => $dsn)
+    assert_eq scalar(@ret), 1, "upsert RETURNING: 1 row back"
+    assert_eq $ret[0]->{name}, "b", "upsert RETURNING: row payload"
+
+    # a conflict-target naming an invalid identifier is rejected
+    val $bad = !eval {
+        Postgres::upsert($kv, { id => 3 }, conflict => ["id; DROP TABLE $kv; --"], url => $dsn)
+        1
+    }
+    assert_ok $bad, "upsert: rejects an injection conflict identifier"
+
+    eval { Postgres::execute("DROP TABLE $kv", url => $dsn) }
+
     eval { Postgres::execute("DROP TABLE $tbl", url => $dsn) }
 }
 

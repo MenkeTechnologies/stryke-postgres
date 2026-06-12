@@ -152,7 +152,27 @@ arrayref (positional `$1`, `$2`, …).
 Postgres::execute     $sql, %opts → { affected }
 Postgres::exec_file   $path, %opts → per-script result
 Postgres::insert_many $table, $rows_aref, %opts → $inserted_count | @rows  # @rows when opts{returning} set
+Postgres::upsert      $table, $row_href, %opts → $affected | @rows         # INSERT … ON CONFLICT DO UPDATE
 Postgres::truncate    $table, %opts → 1            # %opts restart_identity => 1 for RESTART IDENTITY
+```
+
+`upsert` inserts a single row and, on a unique/PK conflict over the
+`conflict` columns, updates the `update` columns from the proposed row
+(`EXCLUDED.*`). Options: `conflict => \@cols` (required); `update =>
+\@cols` (defaults to every row column that isn't a conflict target — an
+empty list makes the conflict a no-op, `DO NOTHING`); `returning =>
+"col,…" | "*"` to get the affected rows back instead of a count. Column,
+conflict, and update names are identifier-validated; values are bound.
+
+```stryke
+# insert, or on id-conflict overwrite name + hits
+Postgres::upsert "kv", { id => 1, name => "a", hits => 1 }, conflict => ["id"]
+# only bump hits on conflict, keep the existing name
+Postgres::upsert "kv", { id => 1, name => "x", hits => 9 },
+                 conflict => ["id"], update => ["hits"]
+# get the row back
+my @r = Postgres::upsert "kv", { id => 2, name => "b" },
+                         conflict => ["id"], returning => "*"
 ```
 
 ### Transactions

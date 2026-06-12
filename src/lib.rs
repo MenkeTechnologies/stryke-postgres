@@ -196,11 +196,27 @@ impl ToSql for PgParam {
         out: &mut bytes::BytesMut,
     ) -> std::result::Result<postgres::types::IsNull, Box<dyn std::error::Error + Sync + Send>>
     {
+        use postgres::types::Type;
         match self {
             PgParam::Null => Ok(postgres::types::IsNull::Yes),
             PgParam::Bool(b) => b.to_sql(ty, out),
-            PgParam::Int(n) => n.to_sql(ty, out),
-            PgParam::Float(f) => f.to_sql(ty, out),
+            // A JSON number arrives as i64, but `i64::to_sql` only accepts
+            // INT8 — binding it to an INT2/INT4 (the common case: an `id INT`
+            // column) would fail the type check. Narrow to the column's
+            // integer width, and allow an integer literal to satisfy a float
+            // column, so `bind => [1]` works regardless of the target type.
+            PgParam::Int(n) => match *ty {
+                Type::INT2 => (*n as i16).to_sql(ty, out),
+                Type::INT4 => (*n as i32).to_sql(ty, out),
+                Type::FLOAT4 => (*n as f32).to_sql(ty, out),
+                Type::FLOAT8 => (*n as f64).to_sql(ty, out),
+                _ => n.to_sql(ty, out),
+            },
+            // Likewise narrow f64 to FLOAT4 when the column is real.
+            PgParam::Float(f) => match *ty {
+                Type::FLOAT4 => (*f as f32).to_sql(ty, out),
+                _ => f.to_sql(ty, out),
+            },
             PgParam::Str(s) => s.to_sql(ty, out),
             PgParam::Json(v) => v.to_sql(ty, out),
         }
@@ -671,6 +687,44 @@ mod tests {
         if let Err(p) = result {
             std::panic::resume_unwind(p);
         }
+    }
+
+    // ── bind param type narrowing ──
+    //
+    // A JSON integer is carried as PgParam::Int(i64). The postgres crate's
+    // `i64::to_sql` only ACCEPTS Type::INT8, so without the narrowing in the
+    // PgParam ToSql impl, `bind => [1]` against an `id INT` (INT4) column —
+    // the single most common bind — fails the type check at encode time. This
+    // pins that an integer bind encodes against every integer width plus the
+    // float columns.
+    #[test]
+    fn int_param_narrows_across_integer_and_float_widths() {
+        use postgres::types::{ToSql, Type};
+        for ty in [
+            Type::INT2,
+            Type::INT4,
+            Type::INT8,
+            Type::FLOAT4,
+            Type::FLOAT8,
+        ] {
+            let mut buf = bytes::BytesMut::new();
+            assert!(
+                PgParam::Int(42).to_sql_checked(&ty, &mut buf).is_ok(),
+                "Int(42) must encode against {ty}"
+            );
+        }
+    }
+
+    #[test]
+    fn float_param_narrows_to_float4() {
+        use postgres::types::{ToSql, Type};
+        let mut buf = bytes::BytesMut::new();
+        assert!(
+            PgParam::Float(1.5)
+                .to_sql_checked(&Type::FLOAT4, &mut buf)
+                .is_ok(),
+            "Float must encode against a FLOAT4 column"
+        );
     }
 
     // ── url_from_opts ──

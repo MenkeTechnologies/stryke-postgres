@@ -161,6 +161,70 @@ fn Postgres::insert_many ($table, $rows, %opts) {
     defined($opts{returning}) ? @{ $res->{rows} } : $res->{inserted}
 }
 
+## Validate $name as a plain SQL identifier ([A-Za-z_][A-Za-z0-9_]*); die
+## otherwise. Used where upsert interpolates names straight into SQL.
+fn Postgres::_ident ($name, $what = "identifier") {
+    unless (defined($name) && $name =~ /^[A-Za-z_][A-Za-z0-9_]*$/) {
+        die "Postgres::upsert: $what must be a plain identifier, got `$name`"
+    }
+    $name
+}
+
+## Validate a RETURNING spec ("*" or a comma-separated identifier list);
+## return the normalized clause body. Each token is identifier-checked.
+fn Postgres::_returning_expr ($spec) {
+    return "*" if $spec eq "*"
+    join(", ", map { Postgres::_ident($_, "returning column") } split(/\s*,\s*/, $spec))
+}
+
+## INSERT a single $row (hashref of column => value) into $table; on a
+## unique/PK conflict over the `conflict` columns, UPDATE the `update`
+## columns from the proposed row (Postgres EXCLUDED.*). Options:
+##   conflict  => \@cols   (required) conflict-target columns
+##   update    => \@cols   columns to overwrite on conflict; defaults to
+##                         every row column that isn't a conflict target.
+##                         An empty list makes the conflict a no-op (DO NOTHING).
+##   returning => "col,…" | "*"   return the affected rows instead of a count
+## Column / conflict / update names are identifier-validated; values go out
+## as bind params. Returns the affected-row count, or @rows when `returning`
+## is set.
+fn Postgres::upsert ($table, $row, %opts) {
+    die "Postgres::upsert: row must be a hashref" unless ref($row) eq "HASH"
+    val $conflict = $opts{conflict}
+    die "Postgres::upsert: conflict => \\\@cols required" unless ref($conflict) eq "ARRAY" && @$conflict
+
+    Postgres::_ident($table, "table")
+    val @cols = sort keys %$row
+    die "Postgres::upsert: row must have at least one column" unless @cols
+    Postgres::_ident($_, "column") for @cols
+    Postgres::_ident($_, "conflict column") for @$conflict
+
+    var @update
+    if (defined $opts{update}) {
+        die "Postgres::upsert: update must be an arrayref" unless ref($opts{update}) eq "ARRAY"
+        @update = @{ $opts{update} }
+    } else {
+        var %is_conflict = map { ($_, 1) } @$conflict
+        @update = grep { !$is_conflict{$_} } @cols
+    }
+    Postgres::_ident($_, "update column") for @update
+
+    val @ph = map { "\$$_" } 1 .. scalar(@cols)
+    var $sql = "INSERT INTO $table (" . join(", ", @cols) . ") VALUES (" . join(", ", @ph) . ")"
+                . " ON CONFLICT (" . join(", ", @$conflict) . ")"
+    $sql .= @update
+        ? " DO UPDATE SET " . join(", ", map { "$_ = EXCLUDED.$_" } @update)
+        : " DO NOTHING"
+    val @bind = map { $row->{$_} } @cols
+    val @fwd  = Postgres::_conn(\%opts)
+    if (defined $opts{returning}) {
+        $sql .= " RETURNING " . Postgres::_returning_expr($opts{returning})
+        Postgres::query($sql, bind => \@bind, @fwd)
+    } else {
+        Postgres::execute($sql, bind => \@bind, @fwd)->{affected}
+    }
+}
+
 
 # ── transactions ────────────────────────────────────────────────────
 #
