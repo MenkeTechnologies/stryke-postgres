@@ -13,10 +13,10 @@ unless (defined $dsn) {
 
 val $tbl = "stryke_demo_$$"
 
-Postgres::execute("DROP TABLE IF EXISTS $tbl", dsn => $dsn)
+Postgres::execute("DROP TABLE IF EXISTS $tbl", url => $dsn)
 Postgres::execute(
     "CREATE TABLE $tbl (id SERIAL PRIMARY KEY, name TEXT, v DOUBLE PRECISION, meta JSONB)",
-    dsn => $dsn,
+    url => $dsn,
 )
 
 val @rows = map {
@@ -28,17 +28,17 @@ val @rows = map {
 } (1:100)
 
 # Without RETURNING — just the affected count.
-val $r = Postgres::insert_many($tbl, \@rows, dsn => $dsn)
+val $r = Postgres::insert_many($tbl, \@rows, url => $dsn)
 p "inserted #{$r->{affected_rows}} rows"
 
 # With RETURNING — get generated IDs back.
 val @returned = Postgres::insert_many(
     $tbl,
     [{ name => "with_id", v => 999.0, meta => { extra => "yes" } }],
-    dsn       => $dsn,
+    url       => $dsn,
     returning => "id, name",
 )
 p "returned: " . to_json \@returned
 
-p "count: " . Postgres::query_scalar("SELECT COUNT(*) FROM $tbl", dsn => $dsn)
-Postgres::execute("DROP TABLE $tbl", dsn => $dsn)
+p "count: " . Postgres::query_scalar("SELECT COUNT(*) FROM $tbl", url => $dsn)
+Postgres::execute("DROP TABLE $tbl", url => $dsn)

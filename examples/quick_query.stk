@@ -11,12 +11,12 @@ unless (defined $dsn) {
     exit 0
 }
 
-p "databases: " . join(", ", Postgres::databases(dsn => $dsn))
-p "tables:    " . join(", ", Postgres::tables(dsn => $dsn))
+p "databases: " . join(", ", Postgres::databases(url => $dsn))
+p "tables:    " . join(", ", Postgres::tables(url => $dsn))
 
 val @rows = Postgres::query(
     "SELECT current_user AS who, current_database() AS db, version() AS v",
-    dsn => $dsn,
+    url => $dsn,
 )
 for val $r (@rows) {
     p "user=$r->{who} db=$r->{db}"

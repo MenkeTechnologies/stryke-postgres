@@ -1,0 +1,55 @@
+#!/usr/bin/env stryke
+# examples/crud.stk — the CRUD convenience surface of the `Postgres` package.
+#
+# Walks insert_many -> exists -> count -> upsert -> update -> delete, the
+# higher-level helpers that wrap raw SQL. Skips cleanly when no connection
+# URL is set.
+#
+# Run:   DATABASE_URL='postgres://…' s examples/crud.stk
+
+use Postgres
+
+val $url = $ENV{DATABASE_URL} // $ENV{POSTGRES_URL};
+unless (defined $url) {
+    p "set \$DATABASE_URL (or \$POSTGRES_URL) to a postgres connection URL to exercise the demo"
+    exit 0
+}
+
+p "=== Postgres CRUD tour ==="
+
+val $tbl = "stryke_crud_$$"
+Postgres::execute("DROP TABLE IF EXISTS $tbl", url => $url)
+Postgres::execute("CREATE TABLE $tbl (id INT PRIMARY KEY, name TEXT, hits INT)", url => $url)
+
+# insert_many — bulk insert; pass returning => "col" to get rows back.
+val $n = Postgres::insert_many($tbl,
+    [{ id => 1, name => "alice", hits => 1 },
+     { id => 2, name => "bob",   hits => 2 },
+     { id => 3, name => "carol", hits => 3 }], url => $url)
+p "insert_many  -> $n rows"
+
+# exists — short-circuiting row check; honors a bind param.
+p "exists id=2  -> " . Postgres::exists($tbl, "id = 2", url => $url)
+p "exists bind  -> " . Postgres::exists($tbl, "name = \$1", url => $url, bind => ["carol"])
+
+# count — with and without a WHERE clause.
+p "count all    -> " . Postgres::count($tbl, undef, url => $url)
+p "count hits>1 -> " . Postgres::count($tbl, "hits > 1", url => $url)
+
+# upsert — INSERT … ON CONFLICT DO UPDATE.
+Postgres::upsert($tbl, { id => 4, name => "dave", hits => 1 }, conflict => ["id"], url => $url)
+Postgres::upsert($tbl, { id => 4, name => "dave", hits => 9 },
+                conflict => ["id"], update => ["hits"], url => $url)
+val $dave = Postgres::query_one("SELECT name, hits FROM $tbl WHERE id = 4", url => $url)
+p "upsert id=4  -> $dave->{name} hits=$dave->{hits}"
+
+# update — bound SET, interpolated WHERE; returns affected count.
+val $u = Postgres::update($tbl, { hits => 0 }, "name = 'alice'", url => $url)
+p "update alice -> $u row(s)"
+
+# delete — conditional removal; returns affected count.
+val $d = Postgres::delete($tbl, "hits = 0", url => $url)
+p "delete hits0 -> $d row(s), " . Postgres::count($tbl, undef, url => $url) . " remaining"
+
+Postgres::execute("DROP TABLE $tbl", url => $url)
+p "done"
