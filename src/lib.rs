@@ -491,24 +491,61 @@ fn op_insert_many(opts: Value) -> Result<Value> {
         .collect::<Result<_>>()?;
     let col_list = cols.join(", ");
     let placeholders: Vec<String> = (1..=cols.len()).map(|i| format!("${}", i)).collect();
-    let sql = format!(
-        "INSERT INTO {} ({}) VALUES ({})",
-        table,
-        col_list,
-        placeholders.join(", ")
-    );
+    // Optional RETURNING: a comma-separated list of column identifiers, or
+    // `*`. Each token is validated as an identifier so the clause can't be
+    // used to smuggle arbitrary SQL.
+    let returning: Option<String> = match opts.get("returning") {
+        Some(Value::String(s)) if !s.trim().is_empty() => {
+            let expr = if s.trim() == "*" {
+                "*".to_string()
+            } else {
+                s.split(',')
+                    .map(|t| validate_identifier(t.trim(), "returning column"))
+                    .collect::<Result<Vec<_>>>()?
+                    .join(", ")
+            };
+            Some(expr)
+        }
+        _ => None,
+    };
+    let sql = match &returning {
+        Some(expr) => format!(
+            "INSERT INTO {} ({}) VALUES ({}) RETURNING {}",
+            table,
+            col_list,
+            placeholders.join(", "),
+            expr
+        ),
+        None => format!(
+            "INSERT INTO {} ({}) VALUES ({})",
+            table,
+            col_list,
+            placeholders.join(", ")
+        ),
+    };
     with_client(&opts, |c| {
         let stmt = c.prepare(&sql)?;
         let mut total = 0i64;
+        let mut returned: Vec<Value> = Vec::new();
         for row in &rows {
             let obj = row
                 .as_object()
                 .ok_or_else(|| anyhow!("row must be an object"))?;
             let params: Vec<PgParam> = cols.iter().map(|k| json_to_param(&obj[k])).collect();
             let p_refs = params_as_sql(&params);
-            total += c.execute(&stmt, &p_refs)? as i64;
+            if returning.is_some() {
+                let result = c.query(&stmt, &p_refs)?;
+                total += result.len() as i64;
+                returned.extend(result.iter().map(row_to_json));
+            } else {
+                total += c.execute(&stmt, &p_refs)? as i64;
+            }
         }
-        Ok(json!({"inserted": total}))
+        if returning.is_some() {
+            Ok(json!({"inserted": total, "rows": returned}))
+        } else {
+            Ok(json!({"inserted": total}))
+        }
     })
 }
 
@@ -1339,6 +1376,27 @@ mod tests {
             assert!(
                 msg.contains("column"),
                 "expected column validation error, got: {msg}"
+            );
+        });
+    }
+
+    // A malicious RETURNING expression must be rejected by validate_identifier
+    // before any SQL is built or a connection opened — the clause is appended
+    // to the INSERT verbatim, so an unchecked value would be a SQL-injection
+    // sink. Each comma-separated token is identifier-validated.
+    #[test]
+    fn op_insert_many_rejects_injection_returning_before_connecting() {
+        with_env(|| {
+            let err = op_insert_many(json!({
+                "table": "users",
+                "rows": [{"id": 1}],
+                "returning": "id; DROP TABLE users; --",
+            }))
+            .expect_err("injection returning clause must be rejected");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("returning column"),
+                "expected returning-column validation error, got: {msg}"
             );
         });
     }

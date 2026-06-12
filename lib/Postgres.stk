@@ -154,8 +154,11 @@ fn Postgres::exec_file ($path, %opts) {
 ## Bulk INSERT $rows (arrayref of hashrefs) into $table.
 fn Postgres::insert_many ($table, $rows, %opts) {
     die "Postgres::insert_many: rows must be arrayref of hashrefs" unless ref($rows) eq "ARRAY"
-    val $r = Postgres::_req({ table => $table, rows => $rows }, \%opts)
-    Postgres::_decode("insert_many", pg__insert_many(to_json($r)))->{inserted}
+    val $r = Postgres::_req({ table => $table, rows => $rows, returning => $opts{returning} }, \%opts)
+    val $res = Postgres::_decode("insert_many", pg__insert_many(to_json($r)))
+    # With a RETURNING clause the generated rows come back; without it, the
+    # plain inserted-row count.
+    defined($opts{returning}) ? @{ $res->{rows} } : $res->{inserted}
 }
 
 
@@ -163,26 +166,41 @@ fn Postgres::insert_many ($table, $rows, %opts) {
 #
 # Postgres caches one connection per (url/host/db/auth) tuple for the life
 # of the process, so BEGIN / your statements / COMMIT issued with the SAME
-# %opts all run on the SAME backend connection. These wrappers ride on that
-# affinity — no new FFI export needed. NB: a transaction is not atomic
-# across threads sharing one connection tuple; use distinct connections
-# (e.g. different db) for concurrent transactions.
+# connection params all run on the SAME backend connection. These wrappers
+# ride on that affinity — no new FFI export needed. NB: a transaction is
+# not atomic across threads sharing one connection tuple; use distinct
+# connections (e.g. different db) for concurrent transactions.
+#
+# Every internal call forwards the connection params as EXPLICIT inline
+# pairs via `_conn` rather than splatting %opts: stryke drops a splatted
+# hash variable's keys when the callee is a store-loaded package fn
+# (BUG-306), which would silently route to the default server / DATABASE_URL.
+
+## Connection params from $opts (a hashref) as a flat inline list, ready
+## to splice straight into a call's argument list — never `%`-splatted.
+fn Postgres::_conn ($opts) {
+    var @c
+    for val $k (qw(url host port user password database)) {
+        push @c, $k, $opts->{$k} if defined $opts->{$k}
+    }
+    @c
+}
 
 ## Open a transaction: BEGIN on the connection for %opts.
 fn Postgres::begin (%opts) {
-    Postgres::execute("BEGIN", %opts)
+    Postgres::execute("BEGIN", Postgres::_conn(\%opts))
     1
 }
 
 ## Commit the open transaction on the connection for %opts.
 fn Postgres::commit (%opts) {
-    Postgres::execute("COMMIT", %opts)
+    Postgres::execute("COMMIT", Postgres::_conn(\%opts))
     1
 }
 
 ## Roll back the open transaction on the connection for %opts.
 fn Postgres::rollback (%opts) {
-    Postgres::execute("ROLLBACK", %opts)
+    Postgres::execute("ROLLBACK", Postgres::_conn(\%opts))
     1
 }
 
@@ -196,13 +214,13 @@ fn Postgres::rollback (%opts) {
 ##   }, %c)
 fn Postgres::transaction ($code, %opts) {
     die "Postgres::transaction: first arg must be a coderef" unless ref($code) eq "CODE"
-    Postgres::begin(%opts)
+    Postgres::begin(Postgres::_conn(\%opts))
     val $r = eval { $code->() }
     if ($@) {
-        eval { Postgres::rollback(%opts) }
+        eval { Postgres::rollback(Postgres::_conn(\%opts)) }
         die $@
     }
-    Postgres::commit(%opts)
+    Postgres::commit(Postgres::_conn(\%opts))
     $r
 }
 
@@ -215,7 +233,9 @@ fn Postgres::count ($table, $where = undef, %opts) {
     val $sql = defined($where) && length($where)
         ? "SELECT count(*) AS n FROM $table WHERE $where"
         : "SELECT count(*) AS n FROM $table"
-    Postgres::query_scalar($sql, %opts) + 0
+    var @fwd = Postgres::_conn(\%opts)
+    push @fwd, bind => $opts{bind} if defined $opts{bind}
+    Postgres::query_scalar($sql, @fwd) + 0
 }
 
 ## True if a table named $name exists in the current database. $name must
@@ -229,7 +249,7 @@ fn Postgres::table_exists ($name, %opts) {
     }
     Postgres::query_scalar(
         "SELECT count(*) FROM information_schema.tables WHERE table_name = '$name'",
-        %opts) > 0 ? 1 : 0
+        Postgres::_conn(\%opts)) > 0 ? 1 : 0
 }
 
 ## TRUNCATE $table (optionally RESTART IDENTITY when restart_identity is
@@ -238,6 +258,6 @@ fn Postgres::truncate ($table, %opts) {
     val $sql = $opts{restart_identity}
         ? "TRUNCATE TABLE $table RESTART IDENTITY"
         : "TRUNCATE TABLE $table"
-    Postgres::execute($sql, %opts)
+    Postgres::execute($sql, Postgres::_conn(\%opts))
     1
 }

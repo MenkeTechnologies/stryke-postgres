@@ -18,106 +18,107 @@ val $alive = defined $dsn && $dsn ne "" && eval { Postgres::ping(url => $dsn) }
 
 if ($alive) {
     val $tbl = "stryke_postgres_test_$$"
-    eval { Postgres::execute("DROP TABLE IF EXISTS $tbl", dsn => $dsn) }
+    eval { Postgres::execute("DROP TABLE IF EXISTS $tbl", url => $dsn) }
 
     # create
     Postgres::execute(
         "CREATE TABLE $tbl (id SERIAL PRIMARY KEY, name TEXT, score DOUBLE PRECISION, payload JSONB)",
-        dsn => $dsn,
+        url => $dsn,
     )
     assert_ok 1, "create table"
 
     # insert with positional binds + JSONB payload
     val $ins = Postgres::execute(
         "INSERT INTO $tbl (name, score, payload) VALUES (\$1,\$2,\$3),(\$4,\$5,\$6),(\$7,\$8,\$9)",
-        dsn  => $dsn,
+        url  => $dsn,
         bind => ["alice", 1.5, {color => "blue"},
                  "bob",   2.0, {color => "red"},
                  "charlie", 3.25, {color => "green"}],
     )
-    assert_eq $ins->{affected_rows}, 3, "insert: affected_rows=3"
+    assert_eq $ins->{affected}, 3, "insert: affected=3"
 
     # select
-    val @rows = Postgres::query("SELECT * FROM $tbl ORDER BY id", dsn => $dsn)
+    val @rows = Postgres::query("SELECT * FROM $tbl ORDER BY id", url => $dsn)
     assert_eq scalar(@rows), 3, "select: 3 rows"
 
     # bind in query
-    val @bobs = Postgres::query("SELECT * FROM $tbl WHERE name = \$1", dsn => $dsn, bind => ["bob"])
+    val @bobs = Postgres::query("SELECT * FROM $tbl WHERE name = \$1", url => $dsn, bind => ["bob"])
     assert_eq scalar(@bobs), 1, "bind query: 1 row"
     assert_eq $bobs[0]->{name}, "bob", "bind query: name=bob"
 
     # query_scalar
-    assert_eq Postgres::query_scalar("SELECT COUNT(*) AS n FROM $tbl", dsn => $dsn), 3, "query_scalar count"
+    assert_eq Postgres::query_scalar("SELECT COUNT(*) AS n FROM $tbl", url => $dsn), 3, "query_scalar count"
 
     # query_one with jsonb decode
-    val $one = Postgres::query_one("SELECT * FROM $tbl WHERE name = \$1", dsn => $dsn, bind => ["alice"])
+    val $one = Postgres::query_one("SELECT * FROM $tbl WHERE name = \$1", url => $dsn, bind => ["alice"])
     assert_eq $one->{name}, "alice", "query_one: name"
     assert_eq $one->{payload}->{color}, "blue", "query_one: jsonb payload decoded"
 
     # query_col
-    val @names = Postgres::query_col("SELECT name FROM $tbl ORDER BY id", dsn => $dsn)
+    val @names = Postgres::query_col("SELECT name FROM $tbl ORDER BY id", url => $dsn)
     assert_eq scalar(@names), 3, "query_col: 3 names"
     assert_eq $names[0], "alice", "query_col: first=alice"
 
     # schema
-    val $sch = Postgres::schema($tbl, dsn => $dsn)
+    val $sch = Postgres::schema($tbl, url => $dsn)
     assert_eq ref($sch->{columns}), "ARRAY", "schema: columns is array"
     assert_eq scalar(@{$sch->{columns}}), 4, "schema: 4 columns"
 
-    # tables list contains ours
-    val @tables = Postgres::tables(dsn => $dsn)
-    val $found = grep { $_ eq $tbl } @tables
+    # tables list contains ours (names come back schema-qualified, e.g.
+    # "public.<table>")
+    val @tables = Postgres::tables(url => $dsn)
+    val $found = grep { $_ eq $tbl || $_ =~ /\.\Q$tbl\E$/ } @tables
     assert_ok $found, "tables: contains $tbl"
 
     # insert_many
     val $im = Postgres::insert_many($tbl,
         [{ name => "dana", score => 4.0, payload => { color => "purple" } },
          { name => "eve",  score => 5.5, payload => { color => "yellow" } }],
-        dsn => $dsn,
+        url => $dsn,
     )
-    assert_eq $im->{affected_rows}, 2, "insert_many: affected_rows=2"
+    assert_eq $im, 2, "insert_many: inserted=2"
 
     # insert_many with RETURNING — generated IDs come back as rows
     val @returned = Postgres::insert_many($tbl,
         [{ name => "frank", score => 6.0, payload => { color => "orange" } }],
-        dsn => $dsn,
+        url => $dsn,
         returning => "id",
     )
     assert_eq scalar(@returned), 1, "insert_many RETURNING: 1 row back"
     assert_ok defined $returned[0]->{id}, "insert_many RETURNING: id defined"
 
     # ── count + table_exists + truncate ──────────────────────────────
-    val $n0 = Postgres::count($tbl, undef, dsn => $dsn)
+    val $n0 = Postgres::count($tbl, undef, url => $dsn)
     assert_ok $n0 > 0, "count returns the row total"
-    assert_eq Postgres::count($tbl, "name = 'alice'", dsn => $dsn), 1, "count honors a WHERE clause"
-    assert_ok  Postgres::table_exists($tbl, dsn => $dsn), "table_exists true for our table"
-    assert_ok !Postgres::table_exists("nope_$$", dsn => $dsn), "table_exists false for an absent table"
+    assert_eq Postgres::count($tbl, "name = 'alice'", url => $dsn), 1, "count honors a WHERE clause"
+    assert_ok  Postgres::table_exists($tbl, url => $dsn), "table_exists true for our table"
+    assert_ok !Postgres::table_exists("nope_$$", url => $dsn), "table_exists false for an absent table"
 
     # ── transaction: commit path ─────────────────────────────────────
     Postgres::transaction(fn {
-        Postgres::execute("INSERT INTO $tbl (name, score) VALUES ('txn-a', 9)", dsn => $dsn)
-        Postgres::execute("INSERT INTO $tbl (name, score) VALUES ('txn-b', 9)", dsn => $dsn)
-    }, dsn => $dsn)
-    assert_eq Postgres::count($tbl, "score = 9", dsn => $dsn), 2, "transaction commits both inserts"
+        Postgres::execute("INSERT INTO $tbl (name, score) VALUES ('txn-a', 9)", url => $dsn)
+        Postgres::execute("INSERT INTO $tbl (name, score) VALUES ('txn-b', 9)", url => $dsn)
+    }, url => $dsn)
+    assert_eq Postgres::count($tbl, "score = 9", url => $dsn), 2, "transaction commits both inserts"
 
     # ── transaction: rollback path (a die inside undoes the work) ─────
-    val $before = Postgres::count($tbl, undef, dsn => $dsn)
+    val $before = Postgres::count($tbl, undef, url => $dsn)
     val $threw  = !eval {
         Postgres::transaction(fn {
-            Postgres::execute("INSERT INTO $tbl (name, score) VALUES ('doomed', 1)", dsn => $dsn)
+            Postgres::execute("INSERT INTO $tbl (name, score) VALUES ('doomed', 1)", url => $dsn)
             die "boom"
-        }, dsn => $dsn)
+        }, url => $dsn)
         1
     }
     assert_ok $threw, "transaction re-raises the inner die"
-    assert_eq Postgres::count($tbl, undef, dsn => $dsn), $before, "rollback undid the failed insert"
-    assert_eq Postgres::count($tbl, "name = 'doomed'", dsn => $dsn), 0, "doomed row never persisted"
+    assert_eq Postgres::count($tbl, undef, url => $dsn), $before, "rollback undid the failed insert"
+    assert_eq Postgres::count($tbl, "name = 'doomed'", url => $dsn), 0, "doomed row never persisted"
 
     # ── truncate empties the table ────────────────────────────────────
-    Postgres::truncate($tbl, dsn => $dsn)
-    assert_eq Postgres::count($tbl, undef, dsn => $dsn), 0, "truncate empties the table"
+    Postgres::truncate($tbl, url => $dsn)
+    assert_eq Postgres::count($tbl, undef, url => $dsn), 0, "truncate empties the table"
 
-    eval { Postgres::execute("DROP TABLE $tbl", dsn => $dsn) }
+    eval { Postgres::execute("DROP TABLE $tbl", url => $dsn) }
 }
 
 test_run

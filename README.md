@@ -109,6 +109,14 @@ Postgres::insert_many "users",
     [{ name => "x", score => 1, meta => { color => "blue" } },
      { name => "y", score => 2, meta => { color => "red"  } }]
 
+# With RETURNING — get the generated rows back instead of a count. The
+# returning clause is a comma-separated identifier list (or "*"); each
+# token is validated, so it's injection-safe.
+my @rows = Postgres::insert_many "users",
+    [{ name => "z", score => 3 }],
+    returning => "id"
+p $rows[0]->{id}
+
 # Schema introspection.
 p to_json Postgres::schema "users"
 p Postgres::tables |> ep
@@ -143,7 +151,7 @@ arrayref (positional `$1`, `$2`, …).
 ```stryke
 Postgres::execute     $sql, %opts → { affected }
 Postgres::exec_file   $path, %opts → per-script result
-Postgres::insert_many $table, $rows_aref, %opts → $inserted_count
+Postgres::insert_many $table, $rows_aref, %opts → $inserted_count | @rows  # @rows when opts{returning} set
 Postgres::truncate    $table, %opts → 1            # %opts restart_identity => 1 for RESTART IDENTITY
 ```
 
