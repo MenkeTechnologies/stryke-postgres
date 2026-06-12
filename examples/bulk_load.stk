@@ -27,9 +27,9 @@ val @rows = map {
     }
 } (1:100)
 
-# Without RETURNING — just the affected count.
+# Without RETURNING — just the inserted-row count (a scalar).
 val $r = Postgres::insert_many($tbl, \@rows, url => $dsn)
-p "inserted #{$r->{affected_rows}} rows"
+p "inserted #{$r} rows"
 
 # With RETURNING — get generated IDs back.
 val @returned = Postgres::insert_many(

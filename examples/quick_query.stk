@@ -14,7 +14,7 @@ unless (defined $dsn) {
 p "databases: " . join(", ", Postgres::databases(url => $dsn))
 p "tables:    " . join(", ", Postgres::tables(url => $dsn))
 
-val @rows = Postgres::query(
+var @rows = Postgres::query(
     "SELECT current_user AS who, current_database() AS db, version() AS v",
     url => $dsn,
 )
