@@ -99,6 +99,29 @@ if ($alive) {
     assert_ok  Postgres::exists($tbl, "name = \$1", url => $dsn, bind => ["alice"]), "exists: honors a bind param"
     assert_ok !Postgres::exists($tbl, "name = \$1", url => $dsn, bind => ["nobody"]), "exists: bind param, no match"
 
+    # ── update + delete (bound SET, interpolated WHERE) ───────────────
+    val $crud = "stryke_pg_crud_$$"
+    Postgres::execute("DROP TABLE IF EXISTS $crud", url => $dsn)
+    Postgres::execute("CREATE TABLE $crud (id INT, name TEXT, hits INT)", url => $dsn)
+    Postgres::insert_many($crud,
+        [{ id => 1, name => "a", hits => 1 },
+         { id => 2, name => "b", hits => 2 },
+         { id => 3, name => "c", hits => 3 }], url => $dsn)
+    assert_eq Postgres::update($crud, { name => "B", hits => 9 }, "id = 2", url => $dsn), 1,
+        "update: one matching row affected"
+    val $u = Postgres::query_one("SELECT name, hits FROM $crud WHERE id = 2", url => $dsn)
+    assert_eq $u->{name}, "B", "update: SET applied to name"
+    assert_eq $u->{hits}, 9, "update: SET applied to hits"
+    assert_eq Postgres::update($crud, { hits => 0 }, undef, url => $dsn), 3,
+        "update: no WHERE touches every row"
+    assert_eq Postgres::query_scalar("SELECT sum(hits) FROM $crud", url => $dsn), 0,
+        "update: all hits zeroed"
+    assert_eq Postgres::delete($crud, "id = 1", url => $dsn), 1, "delete: one matching row"
+    assert_eq Postgres::count($crud, undef, url => $dsn), 2, "delete: count reflects removal"
+    assert_eq Postgres::delete($crud, undef, url => $dsn), 2, "delete: no WHERE removes the rest"
+    assert_eq Postgres::count($crud, undef, url => $dsn), 0, "delete: table now empty"
+    eval { Postgres::execute("DROP TABLE $crud", url => $dsn) }
+
     # ── transaction: commit path ─────────────────────────────────────
     Postgres::transaction(fn {
         Postgres::execute("INSERT INTO $tbl (name, score) VALUES ('txn-a', 9)", url => $dsn)

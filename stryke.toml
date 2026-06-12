@@ -1,6 +1,6 @@
 [package]
 name = "stryke-postgres"
-version = "0.3.3"
+version = "0.3.4"
 description = "PostgreSQL client for stryke. cdylib loaded in-process — persistent postgres::Client per connection URL across calls."
 authors = ["MenkeTechnologies"]
 license = "MIT"

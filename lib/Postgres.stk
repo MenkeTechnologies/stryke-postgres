@@ -334,6 +334,39 @@ fn Postgres::exists ($table, $where = undef, %opts) {
         : Postgres::query_scalar($sql, Postgres::_conn(\%opts)) ? 1 : 0
 }
 
+## UPDATE $table, setting the columns in the $set hashref, optionally
+## filtered by $where (omit $where to update every row). SET values are
+## bound ($1..$n); $where is interpolated — pass trusted values there (a
+## parameterized condition would collide with the SET placeholders, so for
+## that use `execute` directly). Table and SET column names are
+## identifier-validated. Returns the affected-row count.
+fn Postgres::update ($table, $set, $where = undef, %opts) {
+    die "Postgres::update: set must be a hashref" unless ref($set) eq "HASH"
+    Postgres::_ident($table, "table")
+    val @cols = sort keys %$set
+    die "Postgres::update: set must name at least one column" unless @cols
+    Postgres::_ident($_, "column") for @cols
+    var @assign
+    var $i = 0
+    for val $c (@cols) {
+        $i++
+        push @assign, "$c = \$$i"
+    }
+    val $cond = defined($where) && length($where) ? " WHERE $where" : ""
+    val $sql = "UPDATE $table SET " . join(", ", @assign) . $cond
+    val @bind = map { $set->{$_} } @cols
+    Postgres::execute($sql, Postgres::_conn(\%opts), bind => \@bind)->{affected}
+}
+
+## DELETE FROM $table, optionally filtered by $where (omit $where to delete
+## every row). $where is interpolated — pass only trusted/validated values.
+## Returns the affected-row count.
+fn Postgres::delete ($table, $where = undef, %opts) {
+    Postgres::_ident($table, "table")
+    val $cond = defined($where) && length($where) ? " WHERE $where" : ""
+    Postgres::execute("DELETE FROM $table$cond", Postgres::_conn(\%opts))->{affected}
+}
+
 ## TRUNCATE $table (optionally RESTART IDENTITY when restart_identity is
 ## set). The table name is interpolated — pass only trusted names.
 fn Postgres::truncate ($table, %opts) {

@@ -153,7 +153,21 @@ Postgres::execute     $sql, %opts → { affected }
 Postgres::exec_file   $path, %opts → per-script result
 Postgres::insert_many $table, $rows_aref, %opts → $inserted_count | @rows  # @rows when opts{returning} set
 Postgres::upsert      $table, $row_href, %opts → $affected | @rows         # INSERT … ON CONFLICT DO UPDATE
+Postgres::update      $table, $set_href, $where?, %opts → $affected   # UPDATE … SET … [WHERE]
+Postgres::delete      $table, $where?, %opts → $affected               # DELETE FROM … [WHERE]
 Postgres::truncate    $table, %opts → 1            # %opts restart_identity => 1 for RESTART IDENTITY
+```
+
+`update` and `delete` complete the CRUD surface. `update` binds the `$set`
+values (`SET col = $1, …`) and interpolates `$where` (pass trusted values
+— a parameterized condition would collide with the SET placeholders, so
+use `execute` for that). `delete` interpolates `$where`. Both omit `$where`
+to affect every row and return the affected-row count. Table and SET
+column names are identifier-validated.
+
+```stryke
+Postgres::update "users", { status => "active", seen => 1 }, "id = 42"
+Postgres::delete "sessions", "expired_at < now()"
 ```
 
 `upsert` inserts a single row and, on a unique/PK conflict over the
