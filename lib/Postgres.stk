@@ -158,3 +158,86 @@ fn Postgres::insert_many ($table, $rows, %opts) {
     Postgres::_decode("insert_many", pg__insert_many(to_json($r)))->{inserted}
 }
 
+
+# ── transactions ────────────────────────────────────────────────────
+#
+# Postgres caches one connection per (url/host/db/auth) tuple for the life
+# of the process, so BEGIN / your statements / COMMIT issued with the SAME
+# %opts all run on the SAME backend connection. These wrappers ride on that
+# affinity — no new FFI export needed. NB: a transaction is not atomic
+# across threads sharing one connection tuple; use distinct connections
+# (e.g. different db) for concurrent transactions.
+
+## Open a transaction: BEGIN on the connection for %opts.
+fn Postgres::begin (%opts) {
+    Postgres::execute("BEGIN", %opts)
+    1
+}
+
+## Commit the open transaction on the connection for %opts.
+fn Postgres::commit (%opts) {
+    Postgres::execute("COMMIT", %opts)
+    1
+}
+
+## Roll back the open transaction on the connection for %opts.
+fn Postgres::rollback (%opts) {
+    Postgres::execute("ROLLBACK", %opts)
+    1
+}
+
+## Run $code inside a transaction: BEGIN, call $code->(), then COMMIT.
+## If $code dies, ROLLBACK and re-raise the original error. Returns
+## whatever $code returned. $code is a coderef; pass connection params in
+## %opts and reference them via closure, e.g.
+##   Postgres::transaction(fn {
+##       Postgres::execute("INSERT ...", %c)
+##       Postgres::execute("UPDATE ...", %c)
+##   }, %c)
+fn Postgres::transaction ($code, %opts) {
+    die "Postgres::transaction: first arg must be a coderef" unless ref($code) eq "CODE"
+    Postgres::begin(%opts)
+    val $r = eval { $code->() }
+    if ($@) {
+        eval { Postgres::rollback(%opts) }
+        die $@
+    }
+    Postgres::commit(%opts)
+    $r
+}
+
+# ── convenience reads / DDL ─────────────────────────────────────────
+
+## Number of rows in $table (optionally matching a WHERE clause passed
+## as $where, with binds in %opts{bind}). The table name is an identifier
+## and is interpolated — pass only trusted/validated names.
+fn Postgres::count ($table, $where = undef, %opts) {
+    val $sql = defined($where) && length($where)
+        ? "SELECT count(*) AS n FROM $table WHERE $where"
+        : "SELECT count(*) AS n FROM $table"
+    Postgres::query_scalar($sql, %opts) + 0
+}
+
+## True if a table named $name exists in the current database. $name must
+## be a plain SQL identifier ([A-Za-z_][A-Za-z0-9_]*); anything else dies.
+## The identifier check makes the inlined literal injection-safe (a bound
+## parameter would be cleaner, but stryke drops the bind when a slurpy
+## %opts is re-forwarded from a store-loaded wrapper — see BUGS note).
+fn Postgres::table_exists ($name, %opts) {
+    unless ($name =~ /^[A-Za-z_][A-Za-z0-9_]*$/) {
+        die "Postgres::table_exists: name must be a plain identifier, got `$name`"
+    }
+    Postgres::query_scalar(
+        "SELECT count(*) FROM information_schema.tables WHERE table_name = '$name'",
+        %opts) > 0 ? 1 : 0
+}
+
+## TRUNCATE $table (optionally RESTART IDENTITY when restart_identity is
+## set). The table name is interpolated — pass only trusted names.
+fn Postgres::truncate ($table, %opts) {
+    val $sql = $opts{restart_identity}
+        ? "TRUNCATE TABLE $table RESTART IDENTITY"
+        : "TRUNCATE TABLE $table"
+    Postgres::execute($sql, %opts)
+    1
+}

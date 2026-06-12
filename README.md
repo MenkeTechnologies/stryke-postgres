@@ -144,15 +144,37 @@ arrayref (positional `$1`, `$2`, …).
 Postgres::execute     $sql, %opts → { affected }
 Postgres::exec_file   $path, %opts → per-script result
 Postgres::insert_many $table, $rows_aref, %opts → $inserted_count
+Postgres::truncate    $table, %opts → 1            # %opts restart_identity => 1 for RESTART IDENTITY
+```
+
+### Transactions
+
+All statements issued with the same `%opts` run on the same cached
+backend connection, so these ride on connection affinity (no extra FFI).
+
+```stryke
+Postgres::begin       %opts → 1                    # BEGIN
+Postgres::commit      %opts → 1                    # COMMIT
+Postgres::rollback    %opts → 1                    # ROLLBACK
+Postgres::transaction $code, %opts → $code_result  # BEGIN; $code->(); COMMIT — or ROLLBACK + re-raise on die
+```
+
+```stryke
+Postgres::transaction fn {
+    Postgres::execute "INSERT INTO accounts (id, cents) VALUES (1, 100)", %c
+    Postgres::execute "UPDATE accounts SET cents = cents - 100 WHERE id = 2", %c
+}, %c
 ```
 
 ### Metadata
 
 ```stryke
-Postgres::ping       %opts → 1 | 0
-Postgres::tables     %opts → @names
-Postgres::databases  %opts → @names
-Postgres::schema     $table, %opts → column metadata for $table
+Postgres::ping         %opts → 1 | 0
+Postgres::tables       %opts → @names
+Postgres::databases    %opts → @names
+Postgres::schema       $table, %opts → column metadata for $table
+Postgres::count        $table, $where?, %opts → $row_count    # SELECT count(*) [WHERE $where]
+Postgres::table_exists $name, %opts → 1 | 0                   # $name must be a plain identifier
 ```
 
 ### Versions

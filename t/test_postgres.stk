@@ -86,6 +86,37 @@ if ($alive) {
     assert_eq scalar(@returned), 1, "insert_many RETURNING: 1 row back"
     assert_ok defined $returned[0]->{id}, "insert_many RETURNING: id defined"
 
+    # ── count + table_exists + truncate ──────────────────────────────
+    val $n0 = Postgres::count($tbl, undef, dsn => $dsn)
+    assert_ok $n0 > 0, "count returns the row total"
+    assert_eq Postgres::count($tbl, "name = 'alice'", dsn => $dsn), 1, "count honors a WHERE clause"
+    assert_ok  Postgres::table_exists($tbl, dsn => $dsn), "table_exists true for our table"
+    assert_ok !Postgres::table_exists("nope_$$", dsn => $dsn), "table_exists false for an absent table"
+
+    # ── transaction: commit path ─────────────────────────────────────
+    Postgres::transaction(fn {
+        Postgres::execute("INSERT INTO $tbl (name, score) VALUES ('txn-a', 9)", dsn => $dsn)
+        Postgres::execute("INSERT INTO $tbl (name, score) VALUES ('txn-b', 9)", dsn => $dsn)
+    }, dsn => $dsn)
+    assert_eq Postgres::count($tbl, "score = 9", dsn => $dsn), 2, "transaction commits both inserts"
+
+    # ── transaction: rollback path (a die inside undoes the work) ─────
+    val $before = Postgres::count($tbl, undef, dsn => $dsn)
+    val $threw  = !eval {
+        Postgres::transaction(fn {
+            Postgres::execute("INSERT INTO $tbl (name, score) VALUES ('doomed', 1)", dsn => $dsn)
+            die "boom"
+        }, dsn => $dsn)
+        1
+    }
+    assert_ok $threw, "transaction re-raises the inner die"
+    assert_eq Postgres::count($tbl, undef, dsn => $dsn), $before, "rollback undid the failed insert"
+    assert_eq Postgres::count($tbl, "name = 'doomed'", dsn => $dsn), 0, "doomed row never persisted"
+
+    # ── truncate empties the table ────────────────────────────────────
+    Postgres::truncate($tbl, dsn => $dsn)
+    assert_eq Postgres::count($tbl, undef, dsn => $dsn), 0, "truncate empties the table"
+
     eval { Postgres::execute("DROP TABLE $tbl", dsn => $dsn) }
 }
 
