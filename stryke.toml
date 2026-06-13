@@ -22,6 +22,10 @@ exports = [
     "pg__exec",
     "pg__dump",
     "pg__insert_many",
+    "pg__copy_in",
+    "pg__copy_out",
+    "pg__notify",
+    "pg__listen",
 ]
 
 [scripts]

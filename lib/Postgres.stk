@@ -140,6 +140,39 @@ fn Postgres::execute ($sql, %opts) {
     Postgres::_decode("execute", pg__execute(to_json($r)))
 }
 
+# ── COPY bulk transfer ──────────────────────────────────────────────
+
+## Bulk-load via COPY ... FROM STDIN. $sql is the COPY statement; $data is the
+## raw payload (text/CSV lines). Returns the row count Postgres reports.
+fn Postgres::copy_in ($sql, $data, %opts) {
+    val $r = Postgres::_req({ sql => $sql, data => $data }, \%opts)
+    Postgres::_decode("copy_in", pg__copy_in(to_json($r)))->{rows}
+}
+
+## Bulk-export via COPY ... TO STDOUT. $sql is the COPY statement. Returns the
+## raw payload string.
+fn Postgres::copy_out ($sql, %opts) {
+    val $r = Postgres::_req({ sql => $sql }, \%opts)
+    Postgres::_decode("copy_out", pg__copy_out(to_json($r)))->{data}
+}
+
+# ── LISTEN / NOTIFY ─────────────────────────────────────────────────
+
+## Send a NOTIFY to $channel with an optional payload (opts: payload).
+fn Postgres::notify ($channel, %opts) {
+    val $r = Postgres::_req({ channel => $channel, payload => $opts{payload} }, \%opts)
+    Postgres::_decode("notify", pg__notify(to_json($r)))
+}
+
+## LISTEN on $channels (a name or arrayref) and drain pending notifications
+## for up to timeout_ms (default 1000). Returns a list of
+## { channel, payload, pid }.
+fn Postgres::listen ($channels, %opts) {
+    val $r = Postgres::_req({ channels => $channels, timeout_ms => $opts{timeout_ms} }, \%opts)
+    val $res = Postgres::_decode("listen", pg__listen(to_json($r)))
+    @{ $res->{notifications} }
+}
+
 ## Read SQL from $path and run as a multi-statement script.
 fn Postgres::exec_file ($path, %opts) {
     die "Postgres::exec_file: file `$path` not found" unless -e $path

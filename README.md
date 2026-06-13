@@ -158,6 +158,28 @@ Postgres::delete      $table, $where?, %opts → $affected               # DELET
 Postgres::truncate    $table, %opts → 1            # %opts restart_identity => 1 for RESTART IDENTITY
 ```
 
+### Bulk transfer (COPY)
+
+```stryke
+Postgres::copy_in   $sql, $data, %opts → $row_count   # COPY … FROM STDIN — bulk load
+Postgres::copy_out  $sql, %opts → $data               # COPY … TO STDOUT — bulk export
+```
+
+`copy_in` streams `$data` (text/CSV/TSV lines, per the COPY statement's
+FORMAT) straight into the table — Postgres's fastest bulk-load path.
+`copy_out` returns the server's COPY payload as a string.
+
+### LISTEN / NOTIFY
+
+```stryke
+Postgres::notify  $channel, %opts → { ok }            # %opts payload => "..."
+Postgres::listen  $channels, %opts → @notifications   # name or aref; %opts timeout_ms (default 1000)
+```
+
+`notify` sends via `pg_notify($1,$2)` (bound, not interpolated). `listen`
+issues `LISTEN` on each channel (identifier-quoted) and drains pending
+notifications for `timeout_ms`, returning `{ channel, payload, pid }` rows.
+
 `update` and `delete` complete the CRUD surface. `update` binds the `$set`
 values (`SET col = $1, …`) and interpolates `$where` (pass trusted values
 — a parameterized condition would collide with the SET placeholders, so

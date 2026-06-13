@@ -18,9 +18,13 @@ use std::os::raw::c_char;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 
+use std::io::{Read, Write};
+use std::time::Duration;
+
 use anyhow::{anyhow, bail, Result};
 use once_cell::sync::OnceCell;
 use parking_lot::Mutex;
+use postgres::fallible_iterator::FallibleIterator;
 use postgres::types::ToSql;
 use postgres::{Client, NoTls, Row};
 use serde_json::{json, Map, Value};
@@ -456,6 +460,95 @@ fn op_exec(opts: Value) -> Result<Value> {
     })
 }
 
+/// Bulk-load via `COPY ... FROM STDIN`. `sql` is the COPY statement; `data`
+/// is the raw payload (text/CSV lines, or whatever FORMAT the statement
+/// declares). Returns the row count Postgres reports.
+fn op_copy_in(opts: Value) -> Result<Value> {
+    let sql = opts["sql"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing sql (a COPY ... FROM STDIN statement)"))?
+        .to_string();
+    let data = opts["data"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing data (the COPY payload)"))?
+        .to_string();
+    with_client(&opts, |c| {
+        let mut writer = c.copy_in(&sql)?;
+        writer.write_all(data.as_bytes())?;
+        let n = writer.finish()?;
+        Ok(json!({"rows": n as i64}))
+    })
+}
+
+/// Bulk-export via `COPY ... TO STDOUT`. Returns the raw payload as `data`.
+fn op_copy_out(opts: Value) -> Result<Value> {
+    let sql = opts["sql"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing sql (a COPY ... TO STDOUT statement)"))?
+        .to_string();
+    with_client(&opts, |c| {
+        let mut reader = c.copy_out(&sql)?;
+        let mut buf = Vec::new();
+        reader.read_to_end(&mut buf)?;
+        Ok(json!({"data": String::from_utf8_lossy(&buf), "bytes": buf.len()}))
+    })
+}
+
+/// Send a `NOTIFY` to `channel` with an optional `payload`. Uses
+/// `pg_notify($1,$2)` so the channel/payload are bound, not interpolated.
+fn op_notify(opts: Value) -> Result<Value> {
+    let channel = opts["channel"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing channel"))?
+        .to_string();
+    let payload = opts["payload"].as_str().unwrap_or("").to_string();
+    with_client(&opts, |c| {
+        c.execute("SELECT pg_notify($1, $2)", &[&channel, &payload])?;
+        Ok(json!({"ok": true, "channel": channel}))
+    })
+}
+
+/// `LISTEN` on one or more `channels`, then drain pending notifications for
+/// up to `timeout_ms` (default 1000). Returns the collected notifications.
+/// Snapshot-style: a long-running listener daemon is out of scope for the
+/// blocking FFI shape.
+fn op_listen(opts: Value) -> Result<Value> {
+    let channels: Vec<String> = match &opts["channels"] {
+        Value::Array(a) => a
+            .iter()
+            .filter_map(|v| v.as_str().map(String::from))
+            .collect(),
+        Value::String(s) => vec![s.clone()],
+        _ => return Err(anyhow!("missing channels (a channel name or array)")),
+    };
+    if channels.is_empty() {
+        return Err(anyhow!("channels must name at least one channel"));
+    }
+    let timeout = Duration::from_millis(opts["timeout_ms"].as_u64().unwrap_or(1000));
+    with_client(&opts, |c| {
+        for ch in &channels {
+            // Channel names can't be bound params in LISTEN; quote as an ident.
+            c.batch_execute(&format!("LISTEN {}", quote_ident(ch)))?;
+        }
+        let mut out = Vec::new();
+        let mut notifs = c.notifications();
+        let mut it = notifs.timeout_iter(timeout);
+        while let Some(n) = it.next()? {
+            out.push(json!({
+                "channel": n.channel(),
+                "payload": n.payload(),
+                "pid": n.process_id(),
+            }));
+        }
+        Ok(json!({"notifications": out, "count": out.len()}))
+    })
+}
+
+/// Quote a Postgres identifier (double-quote, escaping embedded quotes).
+fn quote_ident(name: &str) -> String {
+    format!("\"{}\"", name.replace('"', "\"\""))
+}
+
 fn op_dump(opts: Value) -> Result<Value> {
     let table = validate_identifier(
         opts["table"]
@@ -660,6 +753,26 @@ pub extern "C" fn pg__dump(args: *const c_char) -> *const c_char {
 #[no_mangle]
 pub extern "C" fn pg__insert_many(args: *const c_char) -> *const c_char {
     ffi_call(args, op_insert_many)
+}
+
+#[no_mangle]
+pub extern "C" fn pg__copy_in(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_copy_in)
+}
+
+#[no_mangle]
+pub extern "C" fn pg__copy_out(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_copy_out)
+}
+
+#[no_mangle]
+pub extern "C" fn pg__notify(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_notify)
+}
+
+#[no_mangle]
+pub extern "C" fn pg__listen(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_listen)
 }
 
 #[cfg(test)]
@@ -1476,5 +1589,71 @@ mod tests {
                 "neither injection target nor evil hostname may survive: {u}"
             );
         });
+    }
+
+    // ── new-surface validation (must reject before connecting) ───────────────
+
+    #[test]
+    fn copy_in_requires_sql_and_data_before_connecting() {
+        with_env(|| {
+            assert!(op_copy_in(json!({"data": "1\n"}))
+                .unwrap_err()
+                .to_string()
+                .contains("missing sql"));
+            assert!(op_copy_in(json!({"sql": "COPY t FROM STDIN"}))
+                .unwrap_err()
+                .to_string()
+                .contains("missing data"));
+        });
+    }
+
+    #[test]
+    fn copy_out_requires_sql_before_connecting() {
+        with_env(|| {
+            assert!(op_copy_out(json!({}))
+                .unwrap_err()
+                .to_string()
+                .contains("missing sql"));
+        });
+    }
+
+    #[test]
+    fn notify_requires_channel_before_connecting() {
+        with_env(|| {
+            assert!(op_notify(json!({"payload": "x"}))
+                .unwrap_err()
+                .to_string()
+                .contains("missing channel"));
+        });
+    }
+
+    #[test]
+    fn listen_requires_nonempty_channels_before_connecting() {
+        with_env(|| {
+            assert!(op_listen(json!({}))
+                .unwrap_err()
+                .to_string()
+                .contains("missing channels"));
+            assert!(op_listen(json!({"channels": []}))
+                .unwrap_err()
+                .to_string()
+                .contains("at least one channel"));
+        });
+    }
+
+    /// LISTEN channel names are interpolated, so they MUST be identifier-quoted
+    /// to neutralize an injection like `evt; DROP TABLE x; --`. Pin the quoting.
+    #[test]
+    fn quote_ident_escapes_embedded_quotes() {
+        assert_eq!(quote_ident("events"), "\"events\"");
+        assert_eq!(quote_ident("a\"b"), "\"a\"\"b\"");
+        // An injection payload stays inside one quoted identifier.
+        let q = quote_ident("evt\"; DROP TABLE x; --");
+        assert!(q.starts_with('"') && q.ends_with('"'));
+        assert_eq!(
+            q.matches('"').count(),
+            4,
+            "inner quote must be doubled, ends quoted"
+        );
     }
 }
