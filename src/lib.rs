@@ -549,6 +549,104 @@ fn quote_ident(name: &str) -> String {
     format!("\"{}\"", name.replace('"', "\"\""))
 }
 
+fn op_explain(opts: Value) -> Result<Value> {
+    let sql = opts["sql"].as_str().ok_or_else(|| anyhow!("missing sql"))?;
+    let analyze = opts["analyze"].as_bool().unwrap_or(false);
+    let params = params_from_value(&opts["params"]);
+    // ANALYZE actually runs the statement — only enable when the caller asks.
+    let prefix = if analyze {
+        "EXPLAIN (ANALYZE, FORMAT TEXT) "
+    } else {
+        "EXPLAIN (FORMAT TEXT) "
+    };
+    let full = format!("{}{}", prefix, sql);
+    with_client(&opts, |c| {
+        let p_refs = params_as_sql(&params);
+        let rows = c.query(&full, &p_refs)?;
+        let plan: Vec<String> = rows.iter().map(|r| r.get::<_, String>(0)).collect();
+        Ok(json!({"plan": plan}))
+    })
+}
+
+fn op_views(opts: Value) -> Result<Value> {
+    with_client(&opts, |c| {
+        let rows = c.query(
+            "SELECT schemaname || '.' || viewname FROM pg_views \
+             WHERE schemaname NOT IN ('pg_catalog','information_schema') ORDER BY 1",
+            &[],
+        )?;
+        let names: Vec<String> = rows.iter().map(|r| r.get::<_, String>(0)).collect();
+        Ok(json!({"views": names}))
+    })
+}
+
+fn op_functions(opts: Value) -> Result<Value> {
+    with_client(&opts, |c| {
+        let rows = c.query(
+            "SELECT n.nspname || '.' || p.proname \
+             FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace \
+             WHERE n.nspname NOT IN ('pg_catalog','information_schema') ORDER BY 1",
+            &[],
+        )?;
+        let names: Vec<String> = rows.iter().map(|r| r.get::<_, String>(0)).collect();
+        Ok(json!({"functions": names}))
+    })
+}
+
+fn op_indexes(opts: Value) -> Result<Value> {
+    let table = opts["table"].as_str();
+    with_client(&opts, |c| {
+        let rows = match table {
+            Some(t) => c.query(
+                "SELECT indexname, indexdef FROM pg_indexes WHERE tablename = $1 ORDER BY indexname",
+                &[&t],
+            )?,
+            None => c.query(
+                "SELECT indexname, indexdef FROM pg_indexes \
+                 WHERE schemaname NOT IN ('pg_catalog','information_schema') ORDER BY indexname",
+                &[],
+            )?,
+        };
+        let idx: Vec<Value> = rows
+            .iter()
+            .map(|r| json!({"name": r.get::<_, String>(0), "def": r.get::<_, String>(1)}))
+            .collect();
+        Ok(json!({"indexes": idx}))
+    })
+}
+
+fn op_roles(opts: Value) -> Result<Value> {
+    with_client(&opts, |c| {
+        let rows = c.query(
+            "SELECT rolname, rolsuper, rolcanlogin FROM pg_roles ORDER BY rolname",
+            &[],
+        )?;
+        let roles: Vec<Value> = rows
+            .iter()
+            .map(|r| {
+                json!({
+                    "name": r.get::<_, String>(0),
+                    "superuser": r.get::<_, bool>(1),
+                    "can_login": r.get::<_, bool>(2),
+                })
+            })
+            .collect();
+        Ok(json!({"roles": roles}))
+    })
+}
+
+fn op_db_size(opts: Value) -> Result<Value> {
+    // Bytes for the named (or current) database, plus a pretty form.
+    with_client(&opts, |c| {
+        let row = c.query_one(
+            "SELECT pg_database_size(current_database()), \
+             pg_size_pretty(pg_database_size(current_database()))",
+            &[],
+        )?;
+        Ok(json!({"bytes": row.get::<_, i64>(0), "pretty": row.get::<_, String>(1)}))
+    })
+}
+
 fn op_dump(opts: Value) -> Result<Value> {
     let table = validate_identifier(
         opts["table"]
@@ -773,6 +871,36 @@ pub extern "C" fn pg__notify(args: *const c_char) -> *const c_char {
 #[no_mangle]
 pub extern "C" fn pg__listen(args: *const c_char) -> *const c_char {
     ffi_call(args, op_listen)
+}
+
+#[no_mangle]
+pub extern "C" fn pg__explain(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_explain)
+}
+
+#[no_mangle]
+pub extern "C" fn pg__views(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_views)
+}
+
+#[no_mangle]
+pub extern "C" fn pg__functions(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_functions)
+}
+
+#[no_mangle]
+pub extern "C" fn pg__indexes(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_indexes)
+}
+
+#[no_mangle]
+pub extern "C" fn pg__roles(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_roles)
+}
+
+#[no_mangle]
+pub extern "C" fn pg__db_size(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_db_size)
 }
 
 #[cfg(test)]

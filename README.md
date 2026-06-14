@@ -240,6 +240,12 @@ Postgres::schema       $table, %opts → column metadata for $table
 Postgres::count        $table, $where?, %opts → $row_count    # SELECT count(*) [WHERE $where]
 Postgres::exists       $table, $where?, %opts → 1 | 0         # SELECT EXISTS(…) — short-circuits
 Postgres::table_exists $name, %opts → 1 | 0                   # $name must be a plain identifier
+Postgres::views        %opts → @names                        # user views as schema.view
+Postgres::functions    %opts → @names                        # user functions as schema.fn
+Postgres::indexes      %opts → @{ {name, def} }              # opt: table => "t"
+Postgres::roles        %opts → @{ {name, superuser, can_login} }
+Postgres::explain      $sql, %opts → @plan_lines             # opt: analyze => 1, params
+Postgres::db_size      %opts → { bytes, pretty }             # current database size
 ```
 
 `count` and `exists` interpolate the table name and `$where`; pass binds

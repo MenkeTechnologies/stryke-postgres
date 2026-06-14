@@ -48,4 +48,12 @@ assert_ok exists &Postgres::update, "Postgres::update exists"
 assert_ok exists &Postgres::delete, "Postgres::delete exists"
 assert_ok exists &Postgres::truncate, "Postgres::truncate exists"
 
+# ── Postgres.stk introspection extras ──
+assert_ok exists &Postgres::explain, "Postgres::explain exists"
+assert_ok exists &Postgres::views, "Postgres::views exists"
+assert_ok exists &Postgres::functions, "Postgres::functions exists"
+assert_ok exists &Postgres::indexes, "Postgres::indexes exists"
+assert_ok exists &Postgres::roles, "Postgres::roles exists"
+assert_ok exists &Postgres::db_size, "Postgres::db_size exists"
+
 test_run

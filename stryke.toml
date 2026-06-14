@@ -26,6 +26,12 @@ exports = [
     "pg__copy_out",
     "pg__notify",
     "pg__listen",
+    "pg__explain",
+    "pg__views",
+    "pg__functions",
+    "pg__indexes",
+    "pg__roles",
+    "pg__db_size",
 ]
 
 [scripts]

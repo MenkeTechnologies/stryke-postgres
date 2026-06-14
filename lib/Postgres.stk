@@ -409,3 +409,38 @@ fn Postgres::truncate ($table, %opts) {
     Postgres::execute($sql, Postgres::_conn(\%opts))
     1
 }
+
+# ── introspection extras ─────────────────────────────────────────────
+
+## EXPLAIN $sql; opt `analyze => 1` actually runs it. Returns plan-text lines.
+fn Postgres::explain ($sql, %opts) {
+    val $r = Postgres::_req(
+        { sql => $sql, params => $opts{params}, analyze => ($opts{analyze} ? \1 : \0) }, \%opts)
+    @{ Postgres::_decode("explain", pg__explain(to_json($r)))->{plan} }
+}
+
+## List user views as `schema.view`.
+fn Postgres::views (%opts) {
+    @{ Postgres::_decode("views", pg__views(to_json(Postgres::_req({}, \%opts))))->{views} }
+}
+
+## List user functions/procedures as `schema.function`.
+fn Postgres::functions (%opts) {
+    @{ Postgres::_decode("functions", pg__functions(to_json(Postgres::_req({}, \%opts))))->{functions} }
+}
+
+## List indexes ({ name, def }). opt `table => "t"` scopes to one table.
+fn Postgres::indexes (%opts) {
+    val $r = Postgres::_req({ table => $opts{table} }, \%opts)
+    @{ Postgres::_decode("indexes", pg__indexes(to_json($r)))->{indexes} }
+}
+
+## List roles ({ name, superuser, can_login }).
+fn Postgres::roles (%opts) {
+    @{ Postgres::_decode("roles", pg__roles(to_json(Postgres::_req({}, \%opts))))->{roles} }
+}
+
+## Current database size as { bytes, pretty }.
+fn Postgres::db_size (%opts) {
+    Postgres::_decode("db_size", pg__db_size(to_json(Postgres::_req({}, \%opts))))
+}
