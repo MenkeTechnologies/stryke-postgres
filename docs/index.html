@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark light">
-  <meta name="description" content="stryke-postgres — POSTGRESQL CLIENT FOR STRYKE // OPT-IN PACKAGE. PostgreSQL client for stryke. Opt-in package, kept out of the stryke core binary. NDJSON-by-default output; bind parameters supported.">
+  <meta name="description" content="stryke-postgres — POSTGRESQL CLIENT FOR STRYKE // OPT-IN PACKAGE. PostgreSQL client for stryke. Opt-in package, kept out of the stryke core binary so the daily-driver install stays slim. Ships as a Rust cdylib that stryke dlopens in-process on first `use Postgres`.">
   <title>stryke-postgres — Documentation</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -86,7 +86,7 @@
             <span class="sep">/</span>
             <a href="https://github.com/MenkeTechnologies/MenkeTechnologiesMeta" target="_blank" rel="noopener noreferrer">Meta</a>
           </nav>
-          <p class="docs-build-line">stryke package · CLI launcher <code>postgres</code> · Rust helper <code>stryke-postgres-helper</code> · opt-in (kept out of stryke core)</p>
+          <p class="docs-build-line">stryke package · cdylib <code>libstryke_postgres.{dylib,so}</code> · dlopen'd in-process on <code>use Postgres</code> · opt-in (kept out of stryke core)</p>
         </div>
         <div class="tutorial-toolbar">
           <button type="button" class="btn btn-secondary" id="btnTheme" title="Toggle light/dark">Theme</button>
@@ -108,58 +108,57 @@
 
     <main class="tutorial-main">
       <h2 class="tutorial-title"><span class="step-hash">&gt;_</span>STRYKE-POSTGRES</h2>
-      <p class="tutorial-subtitle"><strong>Postgres without the ORM.</strong> PostgreSQL client for stryke. Opt-in package, kept out of the stryke core binary. NDJSON-by-default output; bind parameters supported.</p>
+      <p class="tutorial-subtitle"><strong>Postgres without the ORM.</strong> PostgreSQL client for stryke. Opt-in package, kept out of the stryke core binary so the daily-driver install stays slim. Ships as a thin stryke library plus a Rust cdylib that stryke <code>dlopen</code>s in-process on first <code>use Postgres</code>.</p>
 
       <section class="tutorial-section">
         <h2>Install</h2>
-<pre># build the helper binary, install as a stryke package
+<pre># from a release (no rustc on the consumer machine)
+s pkg install -g github.com/MenkeTechnologies/stryke-postgres
+
+# from a local checkout
 cd ~/projects/stryke-postgres
-cargo build --release
-s pkg install -g .
+cargo build --release          # produces target/release/libstryke_postgres.{dylib,so}
+s pkg install -g .             # cdylib lands in ~/.stryke/store/postgres@&lt;version&gt;/
 
 # one-liner
-make install
-
-# verify
-postgres --help</pre>
-        <p>After install, <code>postgres --help</code> works from anywhere on PATH (assuming <code>~/.stryke/bin/</code> is on PATH). The stryke library is auto-discoverable to any project that depends on the package via <code>[deps] postgres = { path = "..." }</code> or, when published, by name.</p>
+make install</pre>
+        <p>The cdylib is dlopened in-process on first <code>use Postgres</code> &mdash; no helper-binary fork per call. A <code>postgres::Client</code> cache keyed by connection URL is held in <code>OnceCell</code>, so there is no fresh TCP+TLS+auth handshake per call. Honors <code>DATABASE_URL</code> and <code>POSTGRES_URL</code> env vars. Any stryke script that declares <code>use Postgres</code> resolves the package automatically.</p>
       </section>
 
       <section class="tutorial-section">
-        <h2>CLI: <code>postgres</code></h2>
+        <h2>Quick start: <code>use Postgres</code></h2>
         <table class="example-tbl">
           <tbody>
-            <tr><td>query rows</td><td><code>postgres query 'SELECT id, email FROM users LIMIT 10'</code></td></tr>
-            <tr><td>bind parameters</td><td><code>postgres query 'SELECT * FROM events WHERE day = $1' --bind 2026-05-24</code></td></tr>
-            <tr><td>execute DDL</td><td><code>postgres exec 'CREATE INDEX idx_events_day ON events(day)'</code></td></tr>
-            <tr><td>import NDJSON</td><td><code>cat events.ndjson | postgres insert events</code></td></tr>
-            <tr><td>show schema</td><td><code>postgres describe users</code></td></tr>
+            <tr><td>single scalar</td><td><code>p Postgres::query_scalar "SELECT COUNT(*) FROM users"</code></td></tr>
+            <tr><td>rows with positional binds</td><td><code>my @rows = Postgres::query "SELECT id, name FROM users WHERE created_at &gt; $1", bind =&gt; ["2025-01-01"]</code></td></tr>
+            <tr><td>write path (returns affected)</td><td><code>Postgres::execute "UPDATE users SET name = $1 WHERE id = $2", bind =&gt; ["alice", 42]</code></td></tr>
+            <tr><td>bulk insert</td><td><code>Postgres::insert_many "users", [{ name =&gt; "x", score =&gt; 1 }, { name =&gt; "y", score =&gt; 2 }]</code></td></tr>
+            <tr><td>upsert (ON CONFLICT)</td><td><code>Postgres::upsert "kv", { id =&gt; 1, hits =&gt; 1 }, conflict =&gt; ["id"]</code></td></tr>
+            <tr><td>schema introspection</td><td><code>p to_json Postgres::schema "users"</code></td></tr>
           </tbody>
         </table>
-        <p>The full flag matrix lives in the <a href="https://github.com/MenkeTechnologies/stryke-postgres#0x03-cli-postgres">README "CLI" section</a>.</p>
+        <p>The full API lives in the <a href="https://github.com/MenkeTechnologies/stryke-postgres#0x04-api-reference">README "API reference" section</a>.</p>
       </section>
 
       <section class="tutorial-section">
         <h2>Why a package, not a builtin</h2>
-        <p>Sync <code>postgres</code> crate. Designed for shell pipelines + scripts, not as an ORM layer.</p>
-        <p>The stryke side is a thin NDJSON-pipe wrapper; the heavy code lives in the <code>stryke-postgres-helper</code> sidecar binary and is loaded on demand. Core stryke is never linked against this package's deps.</p>
+        <p>A real database client pulls in 100+ transitive crates (TLS, async runtime, type encoders). Most stryke one-liners never touch Postgres; for the ones that do, opt in with this package.</p>
+        <p>The stryke side is a thin <code>.stk</code> wrapper that calls <code>pg__*</code> FFI symbols on the cdylib; the heavy code lives in <code>libstryke_postgres.{dylib,so}</code>, dlopened in-process on first <code>use Postgres</code>. Core stryke is never linked against this package's deps.</p>
       </section>
 
       <section class="tutorial-section">
-        <h2>Helper protocol</h2>
-        <p>The <code>stryke-postgres-helper</code> sidecar speaks newline-delimited JSON over stdin/stdout. The stryke library shells out per call and pipes structured data both ways. This keeps stryke startup small while making the package's surface area available on demand.</p>
-<pre># manual invocation (debugging only)
-echo '{"op":"version"}' | stryke-postgres-helper</pre>
+        <h2>FFI layer</h2>
+        <p>Each <code>Postgres::*</code> wrapper builds a JSON args dict and calls a sibling <code>pg__*</code> symbol resolved out of <code>libstryke_postgres.{dylib,so}</code>. The cdylib is dlopened in-process on first <code>use Postgres</code>; a <code>postgres::Client</code> cache keyed by connection URL is held in <code>OnceCell</code> &mdash; no fork-per-call, no fresh TCP+TLS+auth handshake. Responses are JSON; errors come back as <code>{"error": "&lt;msg&gt;"}</code> and the wrapper <code>die</code>s with the message.</p>
       </section>
 
       <section class="tutorial-section">
         <h2>Layout</h2>
 <pre>stryke-postgres/
-&#9500;&#9472;&#9472; Cargo.toml             # bin = stryke-postgres-helper (publish = false)
+&#9500;&#9472;&#9472; Cargo.toml             # cdylib crate manifest (crate-type = ["cdylib"], publish = false)
 &#9500;&#9472;&#9472; src/
-&#9474;   &#9492;&#9472;&#9472; main.rs           # helper binary entry point
-&#9500;&#9472;&#9472; lib/                   # stryke .stk wrapper(s)
-&#9500;&#9472;&#9472; stryke.toml            # stryke package manifest
+&#9474;   &#9492;&#9472;&#9472; lib.rs            # cdylib — pg__* extern "C" exports + client cache
+&#9500;&#9472;&#9472; lib/                   # stryke .stk wrapper — `use Postgres`
+&#9500;&#9472;&#9472; stryke.toml            # stryke package manifest ([ffi] exports table)
 &#9500;&#9472;&#9472; t/                     # zunit-style tests
 &#9500;&#9472;&#9472; examples/              # runnable .stk examples
 &#9500;&#9472;&#9472; Makefile               # `make install` builds + installs
