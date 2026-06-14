@@ -444,3 +444,44 @@ fn Postgres::roles (%opts) {
 fn Postgres::db_size (%opts) {
     Postgres::_decode("db_size", pg__db_size(to_json(Postgres::_req({}, \%opts))))
 }
+
+# ── observability / admin ────────────────────────────────────────────
+
+## Active sessions ({ pid, user, state, wait_event_type, age_seconds, query }),
+## excluding this backend. From pg_stat_activity.
+fn Postgres::activity (%opts) {
+    @{ Postgres::_decode("activity", pg__activity(to_json(Postgres::_req({}, \%opts))))->{activity} }
+}
+
+## Current locks ({ pid, locktype, mode, granted, relation }). From pg_locks.
+fn Postgres::locks (%opts) {
+    @{ Postgres::_decode("locks", pg__locks(to_json(Postgres::_req({}, \%opts))))->{locks} }
+}
+
+## Total size of $table (incl. indexes/toast) as { table, bytes, pretty }.
+fn Postgres::table_size ($table, %opts) {
+    val $r = Postgres::_req({ table => $table }, \%opts)
+    Postgres::_decode("table_size", pg__table_size(to_json($r)))
+}
+
+## List sequences as `schema.sequence`.
+fn Postgres::sequences (%opts) {
+    @{ Postgres::_decode("sequences", pg__sequences(to_json(Postgres::_req({}, \%opts))))->{sequences} }
+}
+
+## Installed extensions ({ name, version }).
+fn Postgres::extensions (%opts) {
+    @{ Postgres::_decode("extensions", pg__extensions(to_json(Postgres::_req({}, \%opts))))->{extensions} }
+}
+
+## User triggers ({ name, table, event, timing }).
+fn Postgres::triggers (%opts) {
+    @{ Postgres::_decode("triggers", pg__triggers(to_json(Postgres::_req({}, \%opts))))->{triggers} }
+}
+
+## Cancel the running query on backend $pid (opt `terminate => 1` kills the
+## whole session). Returns { pid, ok }.
+fn Postgres::cancel_backend ($pid, %opts) {
+    val $r = Postgres::_req({ pid => $pid, terminate => ($opts{terminate} ? \1 : \0) }, \%opts)
+    Postgres::_decode("cancel_backend", pg__cancel_backend(to_json($r)))
+}

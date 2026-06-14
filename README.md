@@ -246,6 +246,13 @@ Postgres::indexes      %opts → @{ {name, def} }              # opt: table => "
 Postgres::roles        %opts → @{ {name, superuser, can_login} }
 Postgres::explain      $sql, %opts → @plan_lines             # opt: analyze => 1, params
 Postgres::db_size      %opts → { bytes, pretty }             # current database size
+Postgres::table_size   $table, %opts → { table, bytes, pretty }
+Postgres::activity     %opts → @{ {pid, user, state, age_seconds, query} }   # pg_stat_activity
+Postgres::locks        %opts → @{ {pid, locktype, mode, granted, relation} }
+Postgres::sequences    %opts → @names
+Postgres::extensions   %opts → @{ {name, version} }
+Postgres::triggers     %opts → @{ {name, table, event, timing} }
+Postgres::cancel_backend $pid, %opts → { pid, ok }           # opt: terminate => 1 (hard kill)
 ```
 
 `count` and `exists` interpolate the table name and `$where`; pass binds

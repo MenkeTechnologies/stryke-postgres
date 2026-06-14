@@ -647,6 +647,138 @@ fn op_db_size(opts: Value) -> Result<Value> {
     })
 }
 
+fn op_activity(opts: Value) -> Result<Value> {
+    with_client(&opts, |c| {
+        let rows = c.query(
+            "SELECT pid, usename, state, wait_event_type, \
+             EXTRACT(EPOCH FROM (now() - query_start))::float8 AS age_seconds, query \
+             FROM pg_stat_activity WHERE pid <> pg_backend_pid() AND state IS NOT NULL \
+             ORDER BY query_start",
+            &[],
+        )?;
+        let out: Vec<Value> = rows
+            .iter()
+            .map(|r| {
+                json!({
+                    "pid": r.get::<_, i32>(0),
+                    "user": r.get::<_, Option<String>>(1),
+                    "state": r.get::<_, Option<String>>(2),
+                    "wait_event_type": r.get::<_, Option<String>>(3),
+                    "age_seconds": r.get::<_, Option<f64>>(4),
+                    "query": r.get::<_, Option<String>>(5),
+                })
+            })
+            .collect();
+        Ok(json!({"activity": out}))
+    })
+}
+
+fn op_locks(opts: Value) -> Result<Value> {
+    with_client(&opts, |c| {
+        let rows = c.query(
+            "SELECT l.pid, l.locktype, l.mode, l.granted, c.relname \
+             FROM pg_locks l LEFT JOIN pg_class c ON c.oid = l.relation \
+             ORDER BY l.granted, l.pid",
+            &[],
+        )?;
+        let out: Vec<Value> = rows
+            .iter()
+            .map(|r| {
+                json!({
+                    "pid": r.get::<_, Option<i32>>(0),
+                    "locktype": r.get::<_, Option<String>>(1),
+                    "mode": r.get::<_, Option<String>>(2),
+                    "granted": r.get::<_, Option<bool>>(3),
+                    "relation": r.get::<_, Option<String>>(4),
+                })
+            })
+            .collect();
+        Ok(json!({"locks": out}))
+    })
+}
+
+fn op_table_size(opts: Value) -> Result<Value> {
+    let table = opts["table"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing table"))?;
+    with_client(&opts, |c| {
+        // $1::regclass resolves schema-qualified or bare names safely.
+        let row = c.query_one(
+            "SELECT pg_total_relation_size($1::regclass), \
+             pg_size_pretty(pg_total_relation_size($1::regclass))",
+            &[&table],
+        )?;
+        Ok(
+            json!({"table": table, "bytes": row.get::<_, i64>(0), "pretty": row.get::<_, String>(1)}),
+        )
+    })
+}
+
+fn op_sequences(opts: Value) -> Result<Value> {
+    with_client(&opts, |c| {
+        let rows = c.query(
+            "SELECT sequence_schema || '.' || sequence_name FROM information_schema.sequences \
+             ORDER BY 1",
+            &[],
+        )?;
+        let names: Vec<String> = rows.iter().map(|r| r.get::<_, String>(0)).collect();
+        Ok(json!({"sequences": names}))
+    })
+}
+
+fn op_extensions(opts: Value) -> Result<Value> {
+    with_client(&opts, |c| {
+        let rows = c.query(
+            "SELECT extname, extversion FROM pg_extension ORDER BY extname",
+            &[],
+        )?;
+        let out: Vec<Value> = rows
+            .iter()
+            .map(|r| json!({"name": r.get::<_, String>(0), "version": r.get::<_, Option<String>>(1)}))
+            .collect();
+        Ok(json!({"extensions": out}))
+    })
+}
+
+fn op_triggers(opts: Value) -> Result<Value> {
+    with_client(&opts, |c| {
+        let rows = c.query(
+            "SELECT trigger_name, event_object_table, event_manipulation, action_timing \
+             FROM information_schema.triggers \
+             WHERE trigger_schema NOT IN ('pg_catalog','information_schema') \
+             ORDER BY event_object_table, trigger_name",
+            &[],
+        )?;
+        let out: Vec<Value> = rows
+            .iter()
+            .map(|r| {
+                json!({
+                    "name": r.get::<_, String>(0),
+                    "table": r.get::<_, Option<String>>(1),
+                    "event": r.get::<_, Option<String>>(2),
+                    "timing": r.get::<_, Option<String>>(3),
+                })
+            })
+            .collect();
+        Ok(json!({"triggers": out}))
+    })
+}
+
+fn op_cancel_backend(opts: Value) -> Result<Value> {
+    let pid = opts["pid"].as_i64().ok_or_else(|| anyhow!("missing pid"))? as i32;
+    // `terminate => 1` issues pg_terminate_backend (hard kill) instead of cancel.
+    let terminate = opts["terminate"].as_bool().unwrap_or(false);
+    with_client(&opts, |c| {
+        let sql = if terminate {
+            "SELECT pg_terminate_backend($1)"
+        } else {
+            "SELECT pg_cancel_backend($1)"
+        };
+        let row = c.query_one(sql, &[&pid])?;
+        Ok(json!({"pid": pid, "ok": row.get::<_, bool>(0)}))
+    })
+}
+
 fn op_dump(opts: Value) -> Result<Value> {
     let table = validate_identifier(
         opts["table"]
@@ -901,6 +1033,41 @@ pub extern "C" fn pg__roles(args: *const c_char) -> *const c_char {
 #[no_mangle]
 pub extern "C" fn pg__db_size(args: *const c_char) -> *const c_char {
     ffi_call(args, op_db_size)
+}
+
+#[no_mangle]
+pub extern "C" fn pg__activity(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_activity)
+}
+
+#[no_mangle]
+pub extern "C" fn pg__locks(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_locks)
+}
+
+#[no_mangle]
+pub extern "C" fn pg__table_size(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_table_size)
+}
+
+#[no_mangle]
+pub extern "C" fn pg__sequences(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_sequences)
+}
+
+#[no_mangle]
+pub extern "C" fn pg__extensions(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_extensions)
+}
+
+#[no_mangle]
+pub extern "C" fn pg__triggers(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_triggers)
+}
+
+#[no_mangle]
+pub extern "C" fn pg__cancel_backend(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_cancel_backend)
 }
 
 #[cfg(test)]

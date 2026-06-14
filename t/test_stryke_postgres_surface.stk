@@ -56,4 +56,12 @@ assert_ok exists &Postgres::indexes, "Postgres::indexes exists"
 assert_ok exists &Postgres::roles, "Postgres::roles exists"
 assert_ok exists &Postgres::db_size, "Postgres::db_size exists"
 
+assert_ok exists &Postgres::activity, "Postgres::activity exists"
+assert_ok exists &Postgres::locks, "Postgres::locks exists"
+assert_ok exists &Postgres::table_size, "Postgres::table_size exists"
+assert_ok exists &Postgres::sequences, "Postgres::sequences exists"
+assert_ok exists &Postgres::extensions, "Postgres::extensions exists"
+assert_ok exists &Postgres::triggers, "Postgres::triggers exists"
+assert_ok exists &Postgres::cancel_backend, "Postgres::cancel_backend exists"
+
 test_run

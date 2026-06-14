@@ -32,6 +32,13 @@ exports = [
     "pg__indexes",
     "pg__roles",
     "pg__db_size",
+    "pg__activity",
+    "pg__locks",
+    "pg__table_size",
+    "pg__sequences",
+    "pg__extensions",
+    "pg__triggers",
+    "pg__cancel_backend",
 ]
 
 [scripts]
