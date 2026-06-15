@@ -525,3 +525,11 @@ fn Postgres::quote_qualified_ident ($name) {
 fn Postgres::quote_literal ($value) {
     Postgres::_decode("quote_literal", pg__quote_literal(to_json({ value => $value })))->{quoted}
 }
+
+## Build a Postgres array literal "{a,b,c}" from an arrayref of strings. An
+## element is double-quoted (with " and \ escaped) when it is empty, contains
+## ,{}"\ or whitespace, or equals NULL case-insensitively. Wrap the result with
+## quote_literal to inline it as a value.
+fn Postgres::format_array ($elements) {
+    Postgres::_decode("format_array", pg__format_array(to_json({ elements => $elements })))->{array}
+}

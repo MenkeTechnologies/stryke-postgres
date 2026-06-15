@@ -1090,6 +1090,37 @@ fn op_quote_literal(opts: Value) -> Result<Value> {
     Ok(json!({"quoted": format!("'{}'", value.replace('\'', "''"))}))
 }
 
+/// Build a Postgres array literal `{a,b,c}` from a list of string `elements`,
+/// following the input syntax: an element is double-quoted (with `"` and `\`
+/// backslash-escaped) when it is empty, contains `,{}"\` or whitespace, or
+/// equals `NULL` case-insensitively; otherwise it is emitted bare. The result
+/// is the array body — wrap it with `quote_literal` to inline it as a value.
+/// Pure.
+fn op_format_array(opts: Value) -> Result<Value> {
+    let elements = opts
+        .get("elements")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("missing elements (array of strings)"))?;
+    let needs_quoting = |s: &str| -> bool {
+        s.is_empty()
+            || s.eq_ignore_ascii_case("null")
+            || s.chars()
+                .any(|c| matches!(c, ',' | '{' | '}' | '"' | '\\') || c.is_whitespace())
+    };
+    let parts: Vec<String> = elements
+        .iter()
+        .map(|e| {
+            let s = e.as_str().unwrap_or("");
+            if needs_quoting(s) {
+                format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+            } else {
+                s.to_string()
+            }
+        })
+        .collect();
+    Ok(json!({"array": format!("{{{}}}", parts.join(","))}))
+}
+
 // ── exports ─────────────────────────────────────────────────────────────────
 
 #[no_mangle]
@@ -1255,6 +1286,11 @@ pub extern "C" fn pg__quote_qualified_ident(args: *const c_char) -> *const c_cha
 #[no_mangle]
 pub extern "C" fn pg__quote_literal(args: *const c_char) -> *const c_char {
     ffi_call(args, op_quote_literal)
+}
+
+#[no_mangle]
+pub extern "C" fn pg__format_array(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_format_array)
 }
 
 #[cfg(test)]
@@ -2232,6 +2268,32 @@ mod tests {
         assert!(op_quote_qualified_ident(json!({"name": "public."})).is_err());
         assert!(op_quote_qualified_ident(json!({"name": ".table"})).is_err());
         assert!(op_quote_qualified_ident(json!({"name": "a..b"})).is_err());
+    }
+
+    #[test]
+    fn format_array_quotes_only_elements_that_need_it() {
+        // Plain tokens stay bare; the result is a Postgres array literal.
+        assert_eq!(
+            op_format_array(json!({"elements": ["a", "b", "c"]})).unwrap()["array"],
+            json!("{a,b,c}")
+        );
+        // Comma, whitespace, empty, and case-insensitive NULL force quoting.
+        assert_eq!(
+            op_format_array(json!({"elements": ["a,b", "c d", "", "NULL", "ok"]})).unwrap()
+                ["array"],
+            json!("{\"a,b\",\"c d\",\"\",\"NULL\",ok}")
+        );
+        // Embedded quote and backslash are backslash-escaped inside the quotes.
+        assert_eq!(
+            op_format_array(json!({"elements": ["he\"llo", "a\\b"]})).unwrap()["array"],
+            json!("{\"he\\\"llo\",\"a\\\\b\"}")
+        );
+        // Empty list → empty array literal.
+        assert_eq!(
+            op_format_array(json!({"elements": []})).unwrap()["array"],
+            json!("{}")
+        );
+        assert!(op_format_array(json!({})).is_err());
     }
 
     #[test]

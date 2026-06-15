@@ -217,6 +217,11 @@ assert_eq Postgres::quote_qualified_ident("public.my table"), "\"public\".\"my t
 assert_eq Postgres::quote_qualified_ident("users"), "\"users\"", "quote_qualified_ident: bare identifier still quoted"
 assert_dies fn { Postgres::quote_qualified_ident("public.") }, "quote_qualified_ident rejects empty trailing segment"
 
+# format_array: Postgres array literal with selective element quoting.
+assert_eq Postgres::format_array(["a", "b", "c"]), "{a,b,c}", "format_array: plain tokens stay bare"
+assert_eq Postgres::format_array(["a,b", "c d", "NULL"]), "{\"a,b\",\"c d\",\"NULL\"}", "format_array: comma/space/NULL forced to quote"
+assert_eq Postgres::format_array([]), "{}", "format_array: empty list"
+
 assert_dies fn { Postgres::parse_dsn("host=localhost dbname=x") }, "parse_dsn rejects keyword/value form"
 
 test_run

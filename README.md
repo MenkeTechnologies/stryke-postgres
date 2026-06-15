@@ -263,6 +263,7 @@ Postgres::build_dsn(%opts)     → $dsn        # parts → URI DSN; inverse of p
 Postgres::quote_ident($name)   → $quoted     # "weird""col"
 Postgres::quote_qualified_ident($name) → $quoted  # public.my table → "public"."my table"
 Postgres::quote_literal($val)  → $quoted     # 'O''Brien'
+Postgres::format_array(\@elems) → $literal    # ["a,b","c"] → {"a,b",c} (Postgres array input syntax)
 ```
 
 `count` and `exists` interpolate the table name and `$where`; pass binds
