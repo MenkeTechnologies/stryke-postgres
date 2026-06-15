@@ -1121,6 +1121,79 @@ fn op_format_array(opts: Value) -> Result<Value> {
     Ok(json!({"array": format!("{{{}}}", parts.join(","))}))
 }
 
+/// Parse a one-dimensional Postgres array literal `{a,b,"c,d"}` into a list of
+/// `elements`. Double-quoted elements are unescaped (`\"`→`"`, `\\`→`\`); an
+/// unquoted `NULL` (case-insensitive) becomes a JSON null while a quoted
+/// `"NULL"` stays the string. Unquoted leading/trailing whitespace is trimmed.
+/// Multidimensional arrays (nested `{}`) are rejected. Inverse of
+/// `format_array`. opts: array (required). Pure.
+fn op_parse_array(opts: Value) -> Result<Value> {
+    let input = opts
+        .get("array")
+        .or_else(|| opts.get("value"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing array (a Postgres array literal)"))?;
+    let trimmed = input.trim();
+    let inner = trimmed
+        .strip_prefix('{')
+        .and_then(|s| s.strip_suffix('}'))
+        .ok_or_else(|| anyhow!("not a Postgres array literal (expected {{...}}): {input}"))?;
+    let mut elements: Vec<Value> = Vec::new();
+    if inner.trim().is_empty() {
+        return Ok(json!({ "elements": elements }));
+    }
+    let mut chars = inner.chars().peekable();
+    loop {
+        while matches!(chars.peek(), Some(c) if c.is_whitespace()) {
+            chars.next();
+        }
+        let mut buf = String::new();
+        let quoted = chars.peek() == Some(&'"');
+        if quoted {
+            chars.next();
+            while let Some(c) = chars.next() {
+                match c {
+                    '\\' => {
+                        if let Some(n) = chars.next() {
+                            buf.push(n);
+                        }
+                    }
+                    '"' => break,
+                    _ => buf.push(c),
+                }
+            }
+            while matches!(chars.peek(), Some(c) if c.is_whitespace()) {
+                chars.next();
+            }
+        } else {
+            while let Some(&c) = chars.peek() {
+                match c {
+                    ',' => break,
+                    '{' | '}' => {
+                        return Err(anyhow!("multidimensional arrays not supported: {input}"))
+                    }
+                    _ => {
+                        buf.push(c);
+                        chars.next();
+                    }
+                }
+            }
+            buf = buf.trim_end().to_string();
+        }
+        if !quoted && buf.eq_ignore_ascii_case("null") {
+            elements.push(Value::Null);
+        } else {
+            elements.push(json!(buf));
+        }
+        match chars.next() {
+            Some(',') => continue,
+            None => break,
+            Some(c) => return Err(anyhow!("expected ',' between array elements, got `{c}`")),
+        }
+    }
+    Ok(json!({ "elements": elements }))
+}
+
 // ── exports ─────────────────────────────────────────────────────────────────
 
 #[no_mangle]
@@ -1291,6 +1364,11 @@ pub extern "C" fn pg__quote_literal(args: *const c_char) -> *const c_char {
 #[no_mangle]
 pub extern "C" fn pg__format_array(args: *const c_char) -> *const c_char {
     ffi_call(args, op_format_array)
+}
+
+#[no_mangle]
+pub extern "C" fn pg__parse_array(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_parse_array)
 }
 
 #[cfg(test)]
@@ -2294,6 +2372,44 @@ mod tests {
             json!("{}")
         );
         assert!(op_format_array(json!({})).is_err());
+    }
+
+    #[test]
+    fn parse_array_inverts_format_array() {
+        // Bare and quoted elements; quoted "NULL" stays a string.
+        assert_eq!(
+            op_parse_array(json!({"array": "{a,b,c}"})).unwrap()["elements"],
+            json!(["a", "b", "c"])
+        );
+        assert_eq!(
+            op_parse_array(json!({"array": "{\"a,b\",\"c d\",\"\",\"NULL\",ok}"})).unwrap()
+                ["elements"],
+            json!(["a,b", "c d", "", "NULL", "ok"])
+        );
+        // Backslash-unescape mirrors format_array's escaping.
+        assert_eq!(
+            op_parse_array(json!({"array": "{\"he\\\"llo\",\"a\\\\b\"}"})).unwrap()["elements"],
+            json!(["he\"llo", "a\\b"])
+        );
+        // Unquoted NULL is a real null; empty array is an empty list.
+        assert_eq!(
+            op_parse_array(json!({"array": "{a,NULL,b}"})).unwrap()["elements"],
+            json!(["a", null, "b"])
+        );
+        assert_eq!(
+            op_parse_array(json!({"array": "{}"})).unwrap()["elements"],
+            json!([])
+        );
+        // Round-trips every needs-quoting case through format_array.
+        let src = json!(["a,b", "c d", "", "NULL", "ok", "he\"llo", "a\\b"]);
+        let lit = op_format_array(json!({"elements": src})).unwrap()["array"].clone();
+        assert_eq!(
+            op_parse_array(json!({"array": lit})).unwrap()["elements"],
+            src
+        );
+        // Not an array literal, and multidimensional input, both reject.
+        assert!(op_parse_array(json!({"array": "a,b,c"})).is_err());
+        assert!(op_parse_array(json!({"array": "{{1,2},{3,4}}"})).is_err());
     }
 
     #[test]

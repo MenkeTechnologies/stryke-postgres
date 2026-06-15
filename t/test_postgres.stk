@@ -222,6 +222,20 @@ assert_eq Postgres::format_array(["a", "b", "c"]), "{a,b,c}", "format_array: pla
 assert_eq Postgres::format_array(["a,b", "c d", "NULL"]), "{\"a,b\",\"c d\",\"NULL\"}", "format_array: comma/space/NULL forced to quote"
 assert_eq Postgres::format_array([]), "{}", "format_array: empty list"
 
+# parse_array: Postgres array literal → arrayref (inverse of format_array).
+val $pa = Postgres::parse_array("{\"a,b\",\"c d\",\"NULL\",ok}")
+assert_eq $pa->[0], "a,b",  "parse_array: quoted comma element"
+assert_eq $pa->[1], "c d",  "parse_array: quoted space element"
+assert_eq $pa->[2], "NULL", "parse_array: quoted NULL stays string"
+assert_eq $pa->[3], "ok",   "parse_array: bare element"
+val $nul = Postgres::parse_array("{a,NULL,b}")
+assert_ok !defined($nul->[1]), "parse_array: unquoted NULL is undef"
+assert_eq scalar(@{Postgres::parse_array("{}")}), 0, "parse_array: empty array → empty list"
+# round-trip through format_array.
+val @src = ("a,b", "c d", "ok")
+assert_eq Postgres::parse_array(Postgres::format_array(\@src))->[0], "a,b", "parse_array: round-trips format_array"
+assert_dies fn { Postgres::parse_array("a,b,c") }, "parse_array: rejects non-array-literal"
+
 assert_dies fn { Postgres::parse_dsn("host=localhost dbname=x") }, "parse_dsn rejects keyword/value form"
 
 test_run

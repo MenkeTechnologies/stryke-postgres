@@ -533,3 +533,10 @@ fn Postgres::quote_literal ($value) {
 fn Postgres::format_array ($elements) {
     Postgres::_decode("format_array", pg__format_array(to_json({ elements => $elements })))->{array}
 }
+
+## Parse a one-dimensional Postgres array literal "{a,b,\"c,d\"}" into an
+## arrayref of strings. Quoted elements are unescaped; an unquoted NULL becomes
+## undef while a quoted "NULL" stays the string. Inverse of format_array.
+fn Postgres::parse_array ($array) {
+    Postgres::_decode("parse_array", pg__parse_array(to_json({ array => $array })))->{elements}
+}
