@@ -1150,6 +1150,31 @@ fn op_quote_literal(opts: Value) -> Result<Value> {
     Ok(json!({"quoted": format!("'{}'", value.replace('\'', "''"))}))
 }
 
+/// Decode a standard single-quoted Postgres string literal back to its raw value
+/// — the inverse of `quote_literal`. Under `standard_conforming_strings` (the
+/// default), the only escape inside `'…'` is a doubled quote `''` → `'`, with no
+/// backslash processing. Requires the value to be wrapped in single quotes with
+/// every embedded quote doubled (an unpaired quote is rejected). `E'…'`
+/// escape-strings and dollar-quoting are NOT handled — only the form
+/// `quote_literal` produces. opts: `value` (required). Returns `{value}`. Pure.
+fn op_unquote_literal(opts: Value) -> Result<Value> {
+    let input = opts
+        .get("value")
+        .or_else(|| opts.get("literal"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing value"))?;
+    let inner = input
+        .strip_prefix('\'')
+        .and_then(|s| s.strip_suffix('\''))
+        .filter(|_| input.len() >= 2)
+        .ok_or_else(|| anyhow!("not a single-quoted literal: {input}"))?;
+    // Every embedded quote must be doubled — an odd count means a stray quote.
+    if inner.matches('\'').count() % 2 != 0 {
+        return Err(anyhow!("malformed literal: unpaired quote inside {input}"));
+    }
+    Ok(json!({ "value": inner.replace("''", "'") }))
+}
+
 /// Build a Postgres array literal `{a,b,c}` from a list of string `elements`,
 /// following the input syntax: an element is double-quoted (with `"` and `\`
 /// backslash-escaped) when it is empty, contains `,{}"\` or whitespace, or
@@ -1424,6 +1449,11 @@ pub extern "C" fn pg__parse_qualified_ident(args: *const c_char) -> *const c_cha
 #[no_mangle]
 pub extern "C" fn pg__quote_literal(args: *const c_char) -> *const c_char {
     ffi_call(args, op_quote_literal)
+}
+
+#[no_mangle]
+pub extern "C" fn pg__unquote_literal(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_unquote_literal)
 }
 
 #[no_mangle]
@@ -2392,6 +2422,41 @@ mod tests {
         assert_eq!(id["quoted"], json!("\"weird\"\"col\""));
         let lit = op_quote_literal(json!({"value": "O'Brien"})).unwrap();
         assert_eq!(lit["quoted"], json!("'O''Brien'"));
+    }
+
+    #[test]
+    fn unquote_literal_inverts_quote_literal() {
+        // Doubled quote decodes to one.
+        assert_eq!(
+            op_unquote_literal(json!({"value": "'O''Brien'"})).unwrap()["value"],
+            json!("O'Brien")
+        );
+        // Empty literal and plain literal.
+        assert_eq!(
+            op_unquote_literal(json!({"value": "''"})).unwrap()["value"],
+            json!("")
+        );
+        assert_eq!(
+            op_unquote_literal(json!({"value": "'plain'"})).unwrap()["value"],
+            json!("plain")
+        );
+        // Backslash is literal under standard_conforming_strings (no escape).
+        assert_eq!(
+            op_unquote_literal(json!({"value": "'a\\b'"})).unwrap()["value"],
+            json!("a\\b")
+        );
+        // Round-trips quote_literal for any input.
+        for raw in ["O'Brien", "", "a'b'c", "plain", "''quoted''"] {
+            let q = op_quote_literal(json!({ "value": raw })).unwrap()["quoted"].clone();
+            assert_eq!(
+                op_unquote_literal(json!({ "value": q })).unwrap()["value"],
+                json!(raw),
+                "round-trip for {raw:?}"
+            );
+        }
+        // Not single-quoted, and an unpaired internal quote, both reject.
+        assert!(op_unquote_literal(json!({"value": "noquotes"})).is_err());
+        assert!(op_unquote_literal(json!({"value": "'a'b'"})).is_err());
     }
 
     #[test]

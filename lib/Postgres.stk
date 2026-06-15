@@ -534,6 +534,13 @@ fn Postgres::quote_literal ($value) {
     Postgres::_decode("quote_literal", pg__quote_literal(to_json({ value => $value })))->{quoted}
 }
 
+## Decode a standard single-quoted SQL literal back to its raw value — inverse of
+## quote_literal. Under standard_conforming_strings, '' un-doubles to ' and
+## backslashes are literal. E'...' and dollar-quoting are not handled.
+fn Postgres::unquote_literal ($value) {
+    Postgres::_decode("unquote_literal", pg__unquote_literal(to_json({ value => $value })))->{value}
+}
+
 ## Build a Postgres array literal "{a,b,c}" from an arrayref of strings. An
 ## element is double-quoted (with " and \ escaped) when it is empty, contains
 ## ,{}"\ or whitespace, or equals NULL case-insensitively. Wrap the result with

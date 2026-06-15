@@ -212,6 +212,14 @@ assert_eq $rt->{dbname},   "app",   "build_dsn → parse_dsn dbname"
 assert_eq Postgres::quote_ident("weird\"col"), "\"weird\"\"col\"", "quote_ident doubles quotes"
 assert_eq Postgres::quote_literal("O'Brien"),  "'O''Brien'",       "quote_literal doubles apostrophes"
 
+# unquote_literal: inverse of quote_literal (standard mode).
+assert_eq Postgres::unquote_literal("'O''Brien'"), "O'Brien", "unquote_literal: un-doubles the quote"
+assert_eq Postgres::unquote_literal("''"), "",               "unquote_literal: empty literal"
+assert_eq Postgres::unquote_literal("'plain'"), "plain",     "unquote_literal: plain literal"
+assert_eq Postgres::unquote_literal(Postgres::quote_literal("a'b'c")), "a'b'c", "unquote_literal: round-trips quote_literal"
+assert_dies fn { Postgres::unquote_literal("noquotes") }, "unquote_literal: rejects a non-quoted value"
+assert_dies fn { Postgres::unquote_literal("'a'b'") }, "unquote_literal: rejects an unpaired internal quote"
+
 # quote_qualified_ident: each dot-separated segment quoted independently.
 assert_eq Postgres::quote_qualified_ident("public.my table"), "\"public\".\"my table\"", "quote_qualified_ident quotes each segment"
 assert_eq Postgres::quote_qualified_ident("users"), "\"users\"", "quote_qualified_ident: bare identifier still quoted"

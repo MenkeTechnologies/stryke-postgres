@@ -71,6 +71,7 @@ assert_ok exists &Postgres::quote_ident, "Postgres::quote_ident exists"
 assert_ok exists &Postgres::quote_qualified_ident, "Postgres::quote_qualified_ident exists"
 assert_ok exists &Postgres::parse_qualified_ident, "Postgres::parse_qualified_ident exists"
 assert_ok exists &Postgres::quote_literal, "Postgres::quote_literal exists"
+assert_ok exists &Postgres::unquote_literal, "Postgres::unquote_literal exists"
 assert_ok exists &Postgres::format_array, "Postgres::format_array exists"
 assert_ok exists &Postgres::parse_array, "Postgres::parse_array exists"
 
