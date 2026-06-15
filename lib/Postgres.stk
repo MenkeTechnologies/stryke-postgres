@@ -521,6 +521,14 @@ fn Postgres::quote_qualified_ident ($name) {
         pg__quote_qualified_ident(to_json({ name => $name })))->{quoted}
 }
 
+## Parse a dotted, possibly-quoted qualified identifier into its segments —
+## inverse of quote_qualified_ident. A "."-inside-quotes stays literal and ""
+## un-doubles. Returns an arrayref of segment strings.
+fn Postgres::parse_qualified_ident ($name) {
+    Postgres::_decode("parse_qualified_ident",
+        pg__parse_qualified_ident(to_json({ name => $name })))->{parts}
+}
+
 ## Quote a SQL string literal (single-quote, doubling embedded quotes).
 fn Postgres::quote_literal ($value) {
     Postgres::_decode("quote_literal", pg__quote_literal(to_json({ value => $value })))->{quoted}

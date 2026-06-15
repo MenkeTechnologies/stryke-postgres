@@ -217,6 +217,17 @@ assert_eq Postgres::quote_qualified_ident("public.my table"), "\"public\".\"my t
 assert_eq Postgres::quote_qualified_ident("users"), "\"users\"", "quote_qualified_ident: bare identifier still quoted"
 assert_dies fn { Postgres::quote_qualified_ident("public.") }, "quote_qualified_ident rejects empty trailing segment"
 
+# parse_qualified_ident: inverse of quote_qualified_ident.
+val $segs = Postgres::parse_qualified_ident("\"public\".\"my table\"")
+assert_eq scalar(@$segs), 2,       "parse_qualified_ident: two segments"
+assert_eq $segs->[0], "public",    "parse_qualified_ident: first segment"
+assert_eq $segs->[1], "my table",  "parse_qualified_ident: quoted segment keeps the space"
+assert_eq Postgres::parse_qualified_ident("\"a.b\".\"c\"")->[0], "a.b", "parse_qualified_ident: dot inside quotes is literal"
+assert_eq Postgres::parse_qualified_ident("\"we\"\"ird\"")->[0], "we\"ird", "parse_qualified_ident: doubled quote decodes to one"
+# round-trips quote_qualified_ident.
+assert_eq Postgres::parse_qualified_ident(Postgres::quote_qualified_ident("public.my table"))->[1], "my table", "parse_qualified_ident: round-trips quote_qualified_ident"
+assert_dies fn { Postgres::parse_qualified_ident("a..b") }, "parse_qualified_ident: rejects an empty segment"
+
 # format_array: Postgres array literal with selective element quoting.
 assert_eq Postgres::format_array(["a", "b", "c"]), "{a,b,c}", "format_array: plain tokens stay bare"
 assert_eq Postgres::format_array(["a,b", "c d", "NULL"]), "{\"a,b\",\"c d\",\"NULL\"}", "format_array: comma/space/NULL forced to quote"
