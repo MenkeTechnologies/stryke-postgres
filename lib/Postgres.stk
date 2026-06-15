@@ -485,3 +485,35 @@ fn Postgres::cancel_backend ($pid, %opts) {
     val $r = Postgres::_req({ pid => $pid, terminate => ($opts{terminate} ? \1 : \0) }, \%opts)
     Postgres::_decode("cancel_backend", pg__cancel_backend(to_json($r)))
 }
+
+# ── pure helpers (no connection) ──────────────────────────────────────
+
+## Parse a URI DSN "postgres[ql]://[user[:pass]@]host[:port][/db][?k=v]" into
+## a hashref { scheme, user, password, host, port, dbname, params }. Userinfo,
+## dbname and param values are percent-decoded.
+fn Postgres::parse_dsn ($dsn) {
+    Postgres::_decode("parse_dsn", pg__parse_dsn(to_json({ dsn => $dsn })))
+}
+
+## Build a URI DSN from explicit parts (percent-encoded, host-sanitized).
+## opts: user, password, host, port, dbname. Inverse of parse_dsn.
+fn Postgres::build_dsn (%opts) {
+    val %req = (
+        user => $opts{user},
+        password => $opts{password},
+        host => $opts{host},
+        port => $opts{port},
+        dbname => $opts{dbname},
+    )
+    Postgres::_decode("build_dsn", pg__build_dsn(to_json(\%req)))->{dsn}
+}
+
+## Quote a SQL identifier (double-quote, doubling embedded quotes).
+fn Postgres::quote_ident ($name) {
+    Postgres::_decode("quote_ident", pg__quote_ident(to_json({ name => $name })))->{quoted}
+}
+
+## Quote a SQL string literal (single-quote, doubling embedded quotes).
+fn Postgres::quote_literal ($value) {
+    Postgres::_decode("quote_literal", pg__quote_literal(to_json({ value => $value })))->{quoted}
+}

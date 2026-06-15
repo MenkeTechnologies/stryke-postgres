@@ -255,6 +255,15 @@ Postgres::triggers     %opts → @{ {name, table, event, timing} }
 Postgres::cancel_backend $pid, %opts → { pid, ok }           # opt: terminate => 1 (hard kill)
 ```
 
+Pure helpers — connection-string and quoting utilities that open no socket:
+
+```stryke
+Postgres::parse_dsn($dsn)      → { scheme, user, password, host, port, dbname, params }
+Postgres::build_dsn(%opts)     → $dsn        # parts → URI DSN; inverse of parse_dsn
+Postgres::quote_ident($name)   → $quoted     # "weird""col"
+Postgres::quote_literal($val)  → $quoted     # 'O''Brien'
+```
+
 `count` and `exists` interpolate the table name and `$where`; pass binds
 in `%opts{bind}` (e.g. `exists "t", "id = $1", bind => [42]`). `exists`
 uses SQL `EXISTS`, which stops at the first matching row — prefer it over

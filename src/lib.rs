@@ -928,6 +928,144 @@ pub unsafe extern "C" fn stryke_free_cstring(p: *mut c_char) {
     drop(CString::from_raw(p));
 }
 
+// ── pure helpers (no connection) ─────────────────────────────────────────────
+
+/// RFC 3986 percent-decode — the inverse of `percent_encode_userinfo`, used to
+/// recover userinfo / dbname / params from a URI DSN. Invalid escapes are left
+/// verbatim.
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hi = (bytes[i + 1] as char).to_digit(16);
+            let lo = (bytes[i + 2] as char).to_digit(16);
+            if let (Some(h), Some(l)) = (hi, lo) {
+                out.push((h * 16 + l) as u8);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Parse a URI DSN `postgres[ql]://[user[:pass]@]host[:port][/dbname][?k=v…]`
+/// into its components. Userinfo, dbname and param values are percent-decoded.
+/// Pure — opens no connection.
+fn op_parse_dsn(opts: Value) -> Result<Value> {
+    let dsn = opts
+        .get("dsn")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing dsn"))?;
+    let (scheme, rest) = dsn
+        .split_once("://")
+        .ok_or_else(|| anyhow!("not a URI DSN (missing `://`): {dsn}"))?;
+    if !matches!(scheme, "postgres" | "postgresql") {
+        bail!("unsupported scheme `{scheme}` (want postgres|postgresql)");
+    }
+    let (authority_path, query) = match rest.split_once('?') {
+        Some((ap, q)) => (ap, Some(q)),
+        None => (rest, None),
+    };
+    let (authority, path) = match authority_path.split_once('/') {
+        Some((a, p)) => (a, Some(p)),
+        None => (authority_path, None),
+    };
+    let (userinfo, hostport) = match authority.rsplit_once('@') {
+        Some((u, h)) => (Some(u), h),
+        None => (None, authority),
+    };
+    let (user, password) = match userinfo {
+        Some(ui) => match ui.split_once(':') {
+            Some((u, p)) => (Some(percent_decode(u)), Some(percent_decode(p))),
+            None => (Some(percent_decode(ui)), None),
+        },
+        None => (None, None),
+    };
+    let (host, port) = match hostport.rsplit_once(':') {
+        Some((h, p)) if !h.is_empty() => (h.to_string(), p.parse::<u32>().ok()),
+        _ => (hostport.to_string(), None),
+    };
+    let dbname = path.map(percent_decode);
+    let mut params = serde_json::Map::new();
+    if let Some(q) = query {
+        for pair in q.split('&').filter(|s| !s.is_empty()) {
+            let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
+            params.insert(percent_decode(k), json!(percent_decode(v)));
+        }
+    }
+    Ok(json!({
+        "scheme": scheme,
+        "user": user,
+        "password": password,
+        "host": host,
+        "port": port,
+        "dbname": dbname,
+        "params": Value::Object(params),
+    }))
+}
+
+/// Build a URI DSN from explicit parts, percent-encoding userinfo/dbname and
+/// sanitizing the host with the same primitives the connector uses. Deterministic
+/// (no env lookups) — the inverse of `parse_dsn`. opts: user, password, host,
+/// port, dbname.
+fn op_build_dsn(opts: Value) -> Result<Value> {
+    let user = opts
+        .get("user")
+        .and_then(Value::as_str)
+        .unwrap_or("postgres");
+    let host = sanitize_host(
+        opts.get("host")
+            .and_then(Value::as_str)
+            .unwrap_or("127.0.0.1"),
+    );
+    let port = opts.get("port").and_then(Value::as_u64).unwrap_or(5432);
+    let dbname = opts
+        .get("dbname")
+        .and_then(Value::as_str)
+        .unwrap_or("postgres");
+    let userinfo = match opts.get("password").and_then(Value::as_str) {
+        Some(p) if !p.is_empty() => format!(
+            "{}:{}",
+            percent_encode_userinfo(user),
+            percent_encode_userinfo(p)
+        ),
+        _ => percent_encode_userinfo(user),
+    };
+    let dsn = format!(
+        "postgresql://{}@{}:{}/{}",
+        userinfo,
+        host,
+        port,
+        percent_encode_userinfo(dbname)
+    );
+    Ok(json!({"dsn": dsn}))
+}
+
+/// Quote a SQL identifier (double-quote, doubling embedded quotes). Pure.
+fn op_quote_ident(opts: Value) -> Result<Value> {
+    let name = opts
+        .get("name")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing name"))?;
+    Ok(json!({"quoted": quote_ident(name)}))
+}
+
+/// Quote a SQL string literal (single-quote, doubling embedded quotes). Pure —
+/// assumes `standard_conforming_strings` (Postgres default), so backslashes are
+/// literal.
+fn op_quote_literal(opts: Value) -> Result<Value> {
+    let value = opts
+        .get("value")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing value"))?;
+    Ok(json!({"quoted": format!("'{}'", value.replace('\'', "''"))}))
+}
+
 // ── exports ─────────────────────────────────────────────────────────────────
 
 #[no_mangle]
@@ -1068,6 +1206,26 @@ pub extern "C" fn pg__triggers(args: *const c_char) -> *const c_char {
 #[no_mangle]
 pub extern "C" fn pg__cancel_backend(args: *const c_char) -> *const c_char {
     ffi_call(args, op_cancel_backend)
+}
+
+#[no_mangle]
+pub extern "C" fn pg__parse_dsn(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_parse_dsn)
+}
+
+#[no_mangle]
+pub extern "C" fn pg__build_dsn(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_build_dsn)
+}
+
+#[no_mangle]
+pub extern "C" fn pg__quote_ident(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_quote_ident)
+}
+
+#[no_mangle]
+pub extern "C" fn pg__quote_literal(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_quote_literal)
 }
 
 #[cfg(test)]
@@ -1950,5 +2108,89 @@ mod tests {
             4,
             "inner quote must be doubled, ends quoted"
         );
+    }
+
+    // ── pure DSN / quoting helpers (no connection) ───────────────────────────
+
+    #[test]
+    fn parse_dsn_full_uri_decomposes_every_part() {
+        let v = op_parse_dsn(json!({
+            "dsn": "postgresql://alice:s3cret@db.example.com:6543/analytics?sslmode=require&application_name=etl"
+        }))
+        .unwrap();
+        assert_eq!(v["scheme"], json!("postgresql"));
+        assert_eq!(v["user"], json!("alice"));
+        assert_eq!(v["password"], json!("s3cret"));
+        assert_eq!(v["host"], json!("db.example.com"));
+        assert_eq!(v["port"], json!(6543));
+        assert_eq!(v["dbname"], json!("analytics"));
+        assert_eq!(v["params"]["sslmode"], json!("require"));
+        assert_eq!(v["params"]["application_name"], json!("etl"));
+    }
+
+    #[test]
+    fn parse_dsn_percent_decodes_userinfo() {
+        // Password `p@ss:word` is percent-encoded in a valid DSN; parsing must
+        // recover it rather than mis-split on the literal `@`/`:`.
+        let v = op_parse_dsn(json!({"dsn": "postgres://u:p%40ss%3Aword@localhost/db"})).unwrap();
+        assert_eq!(v["password"], json!("p@ss:word"));
+        assert_eq!(v["host"], json!("localhost"));
+        assert_eq!(v["port"], Value::Null, "no port → null");
+    }
+
+    #[test]
+    fn parse_dsn_rejects_non_uri_and_bad_scheme() {
+        assert!(op_parse_dsn(json!({"dsn": "host=localhost dbname=x"})).is_err());
+        assert!(op_parse_dsn(json!({"dsn": "mysql://localhost/x"})).is_err());
+        assert!(op_parse_dsn(json!({})).is_err());
+    }
+
+    #[test]
+    fn build_dsn_round_trips_through_parse() {
+        let built = op_build_dsn(json!({
+            "user": "u", "password": "p@ss", "host": "127.0.0.1", "port": 5432, "dbname": "app"
+        }))
+        .unwrap();
+        let dsn = built["dsn"].as_str().unwrap();
+        let parsed = op_parse_dsn(json!({"dsn": dsn})).unwrap();
+        assert_eq!(parsed["user"], json!("u"));
+        assert_eq!(
+            parsed["password"],
+            json!("p@ss"),
+            "round-trips the @ in password"
+        );
+        assert_eq!(parsed["host"], json!("127.0.0.1"));
+        assert_eq!(parsed["port"], json!(5432));
+        assert_eq!(parsed["dbname"], json!("app"));
+    }
+
+    #[test]
+    fn build_dsn_omits_password_section_when_blank() {
+        let built = op_build_dsn(json!({"user": "postgres", "dbname": "postgres"})).unwrap();
+        let dsn = built["dsn"].as_str().unwrap();
+        assert!(
+            !dsn.contains(':') || dsn.contains(":5432"),
+            "no empty password colon: {dsn}"
+        );
+        assert!(
+            dsn.starts_with("postgresql://postgres@"),
+            "userinfo is user-only: {dsn}"
+        );
+    }
+
+    #[test]
+    fn quote_ident_and_literal_double_their_quotes() {
+        let id = op_quote_ident(json!({"name": "weird\"col"})).unwrap();
+        assert_eq!(id["quoted"], json!("\"weird\"\"col\""));
+        let lit = op_quote_literal(json!({"value": "O'Brien"})).unwrap();
+        assert_eq!(lit["quoted"], json!("'O''Brien'"));
+    }
+
+    #[test]
+    fn percent_decode_is_inverse_and_tolerant() {
+        assert_eq!(percent_decode("a%20b%2Fc"), "a b/c");
+        // A stray `%` with no valid hex pair is left verbatim, never panics.
+        assert_eq!(percent_decode("100%"), "100%");
+        assert_eq!(percent_decode("%zz"), "%zz");
     }
 }

@@ -194,4 +194,24 @@ if ($alive) {
     eval { Postgres::execute("DROP TABLE $tbl", url => $dsn) }
 }
 
+# ── pure helpers (no connection — always run) ────────────────────────
+val $p = Postgres::parse_dsn("postgresql://alice:s3cret\@db.example.com:6543/analytics?sslmode=require")
+assert_eq $p->{user},   "alice",           "parse_dsn: user"
+assert_eq $p->{password}, "s3cret",        "parse_dsn: password"
+assert_eq $p->{host},   "db.example.com",  "parse_dsn: host"
+assert_eq $p->{port},   6543,              "parse_dsn: port"
+assert_eq $p->{dbname}, "analytics",       "parse_dsn: dbname"
+assert_eq $p->{params}{sslmode}, "require", "parse_dsn: param"
+
+# percent-encoded @ in password must survive the round trip
+val $built = Postgres::build_dsn(user => "u", password => "p\@ss", host => "127.0.0.1", port => 5432, dbname => "app")
+val $rt = Postgres::parse_dsn($built)
+assert_eq $rt->{password}, "p\@ss", "build_dsn → parse_dsn round-trips the @ password"
+assert_eq $rt->{dbname},   "app",   "build_dsn → parse_dsn dbname"
+
+assert_eq Postgres::quote_ident("weird\"col"), "\"weird\"\"col\"", "quote_ident doubles quotes"
+assert_eq Postgres::quote_literal("O'Brien"),  "'O''Brien'",       "quote_literal doubles apostrophes"
+
+assert_dies fn { Postgres::parse_dsn("host=localhost dbname=x") }, "parse_dsn rejects keyword/value form"
+
 test_run
