@@ -1055,6 +1055,30 @@ fn op_quote_ident(opts: Value) -> Result<Value> {
     Ok(json!({"quoted": quote_ident(name)}))
 }
 
+/// Quote a dotted, schema-qualified identifier: each dot-separated segment is
+/// quoted independently and rejoined with `.`, so `public.my table` becomes
+/// `"public"."my table"`. A literal dot inside a segment must be escaped by the
+/// caller as it cannot be expressed positionally; an empty segment (leading,
+/// trailing, or doubled dot) is rejected. Pure.
+fn op_quote_qualified_ident(opts: Value) -> Result<Value> {
+    let name = opts
+        .get("name")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing name"))?;
+    let parts: Vec<&str> = name.split('.').collect();
+    if parts.iter().any(|p| p.is_empty()) {
+        return Err(anyhow!(
+            "qualified identifier has an empty segment: `{name}`"
+        ));
+    }
+    let quoted = parts
+        .iter()
+        .map(|p| quote_ident(p))
+        .collect::<Vec<_>>()
+        .join(".");
+    Ok(json!({"quoted": quoted, "parts": parts}))
+}
+
 /// Quote a SQL string literal (single-quote, doubling embedded quotes). Pure —
 /// assumes `standard_conforming_strings` (Postgres default), so backslashes are
 /// literal.
@@ -1221,6 +1245,11 @@ pub extern "C" fn pg__build_dsn(args: *const c_char) -> *const c_char {
 #[no_mangle]
 pub extern "C" fn pg__quote_ident(args: *const c_char) -> *const c_char {
     ffi_call(args, op_quote_ident)
+}
+
+#[no_mangle]
+pub extern "C" fn pg__quote_qualified_ident(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_quote_qualified_ident)
 }
 
 #[no_mangle]
@@ -2184,6 +2213,25 @@ mod tests {
         assert_eq!(id["quoted"], json!("\"weird\"\"col\""));
         let lit = op_quote_literal(json!({"value": "O'Brien"})).unwrap();
         assert_eq!(lit["quoted"], json!("'O''Brien'"));
+    }
+
+    #[test]
+    fn quote_qualified_ident_quotes_each_segment() {
+        let q = op_quote_qualified_ident(json!({"name": "public.my table"})).unwrap();
+        assert_eq!(q["quoted"], json!("\"public\".\"my table\""));
+        assert_eq!(q["parts"], json!(["public", "my table"]));
+        // Three-part name with an embedded quote in the last segment.
+        let three = op_quote_qualified_ident(json!({"name": "db.schema.we\"ird"})).unwrap();
+        assert_eq!(three["quoted"], json!("\"db\".\"schema\".\"we\"\"ird\""));
+        // Single bare identifier still works (no dots).
+        assert_eq!(
+            op_quote_qualified_ident(json!({"name": "users"})).unwrap()["quoted"],
+            json!("\"users\"")
+        );
+        // Empty segments (leading/trailing/doubled dot) are rejected.
+        assert!(op_quote_qualified_ident(json!({"name": "public."})).is_err());
+        assert!(op_quote_qualified_ident(json!({"name": ".table"})).is_err());
+        assert!(op_quote_qualified_ident(json!({"name": "a..b"})).is_err());
     }
 
     #[test]

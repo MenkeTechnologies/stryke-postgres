@@ -212,6 +212,11 @@ assert_eq $rt->{dbname},   "app",   "build_dsn → parse_dsn dbname"
 assert_eq Postgres::quote_ident("weird\"col"), "\"weird\"\"col\"", "quote_ident doubles quotes"
 assert_eq Postgres::quote_literal("O'Brien"),  "'O''Brien'",       "quote_literal doubles apostrophes"
 
+# quote_qualified_ident: each dot-separated segment quoted independently.
+assert_eq Postgres::quote_qualified_ident("public.my table"), "\"public\".\"my table\"", "quote_qualified_ident quotes each segment"
+assert_eq Postgres::quote_qualified_ident("users"), "\"users\"", "quote_qualified_ident: bare identifier still quoted"
+assert_dies fn { Postgres::quote_qualified_ident("public.") }, "quote_qualified_ident rejects empty trailing segment"
+
 assert_dies fn { Postgres::parse_dsn("host=localhost dbname=x") }, "parse_dsn rejects keyword/value form"
 
 test_run

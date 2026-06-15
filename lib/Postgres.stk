@@ -513,6 +513,14 @@ fn Postgres::quote_ident ($name) {
     Postgres::_decode("quote_ident", pg__quote_ident(to_json({ name => $name })))->{quoted}
 }
 
+## Quote a dotted, schema-qualified identifier — each "."-separated segment is
+## quoted independently and rejoined, so "public.my table" → "public"."my table".
+## Empty segments (leading/trailing/doubled dot) are rejected.
+fn Postgres::quote_qualified_ident ($name) {
+    Postgres::_decode("quote_qualified_ident",
+        pg__quote_qualified_ident(to_json({ name => $name })))->{quoted}
+}
+
 ## Quote a SQL string literal (single-quote, doubling embedded quotes).
 fn Postgres::quote_literal ($value) {
     Postgres::_decode("quote_literal", pg__quote_literal(to_json({ value => $value })))->{quoted}
