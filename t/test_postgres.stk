@@ -221,6 +221,14 @@ val $kwq = Postgres::parse_keyword_dsn("host = localhost application_name = 'my 
 assert_eq $kwq->{params}{application_name}, "my app", "parse_keyword_dsn: quoted value with spaces"
 assert_dies fn { Postgres::parse_keyword_dsn("host='localhost") }, "parse_keyword_dsn: rejects an unterminated quote"
 
+# build_keyword_dsn: inverse of parse_keyword_dsn (libpq keyword/value form).
+assert_eq Postgres::build_keyword_dsn(host => "db.example.com", port => 6543, dbname => "analytics", user => "alice"), "host=db.example.com port=6543 dbname=analytics user=alice", "build_keyword_dsn: well-known keys in canonical order"
+assert_eq Postgres::build_keyword_dsn(host => "h", params => +{ sslmode => "require" }), "host=h sslmode=require", "build_keyword_dsn: params follow the well-known keys"
+assert_eq Postgres::build_keyword_dsn(password => "a b"), "password='a b'", "build_keyword_dsn: a value with spaces is single-quoted"
+# Round-trips parse_keyword_dsn.
+val $rt = Postgres::parse_keyword_dsn(Postgres::build_keyword_dsn(host => "localhost", dbname => "mydb", user => "foo"))
+assert_eq $rt->{dbname}, "mydb", "build_keyword_dsn → parse_keyword_dsn round-trips"
+assert_dies fn { Postgres::build_keyword_dsn() }, "build_keyword_dsn: dies with no parameters"
 assert_eq Postgres::quote_ident("weird\"col"), "\"weird\"\"col\"", "quote_ident doubles quotes"
 assert_eq Postgres::quote_literal("O'Brien"),  "'O''Brien'",       "quote_literal doubles apostrophes"
 

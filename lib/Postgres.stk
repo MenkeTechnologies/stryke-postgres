@@ -506,6 +506,17 @@ fn Postgres::parse_keyword_dsn ($dsn) {
     Postgres::_decode("parse_keyword_dsn", pg__parse_keyword_dsn(to_json({ dsn => $dsn })))
 }
 
+## Build a libpq keyword/value DSN from parts — the inverse of parse_keyword_dsn
+## and the keyword-form counterpart of build_dsn (URI). Well-known keys
+## (host/port/dbname/user/password) are emitted first in that order, then any
+## %opts{params} (a hashref) sorted by key. A value that is empty or contains
+## whitespace is single-quoted, and a ' or \ inside a value is backslash-escaped,
+## so the output re-parses through parse_keyword_dsn. %opts: host, port, dbname,
+## user, password, params. Returns the DSN string.
+fn Postgres::build_keyword_dsn (%opts) {
+    Postgres::_decode("build_keyword_dsn", pg__build_keyword_dsn(to_json(\%opts)))->{dsn}
+}
+
 ## Build a URI DSN from explicit parts (percent-encoded, host-sanitized).
 ## opts: user, password, host, port, dbname. Inverse of parse_dsn.
 fn Postgres::build_dsn (%opts) {

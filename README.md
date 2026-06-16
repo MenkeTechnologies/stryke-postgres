@@ -260,6 +260,7 @@ Pure helpers — connection-string and quoting utilities that open no socket:
 ```stryke
 Postgres::parse_dsn($dsn)      → { scheme, user, password, host, port, dbname, params }
 Postgres::parse_keyword_dsn($dsn) → { user, password, host, port, dbname, params }   # libpq keyword/value form (host=… dbname=…); space-separated, single-quoted values, \' \\ escapes
+Postgres::build_keyword_dsn(%opts) → $dsn   # parts → libpq keyword/value DSN; inverse of parse_keyword_dsn (well-known keys first, params sorted, spaces single-quoted)
 Postgres::build_dsn(%opts)     → $dsn        # parts → URI DSN; inverse of parse_dsn
 Postgres::quote_ident($name)   → $quoted     # "weird""col"
 Postgres::unquote_ident($quoted) → $name     # inverse of quote_ident: strip quotes, un-double

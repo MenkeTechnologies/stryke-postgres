@@ -1109,6 +1109,57 @@ fn op_parse_keyword_dsn(opts: Value) -> Result<Value> {
     }))
 }
 
+/// Build a libpq keyword/value connection string (`host=localhost dbname=mydb`)
+/// from parts — the inverse of `parse_keyword_dsn`, and the keyword-form
+/// counterpart of `build_dsn` (URI). The well-known keys (`host`, `port`,
+/// `dbname`, `user`, `password`) are emitted first in that order, then any
+/// `params` (a sub-object) sorted by key. Per libpq, a value that is empty or
+/// contains whitespace is single-quoted, and a `'` or `\` inside a value is
+/// backslash-escaped — so the output re-parses through `parse_keyword_dsn`. opts:
+/// `host`, `port`, `dbname`, `user`, `password`, `params`. Returns `{dsn}`. Pure.
+fn op_build_keyword_dsn(opts: Value) -> Result<Value> {
+    fn quote(v: &str) -> String {
+        if v.is_empty()
+            || v.bytes().any(|b| b.is_ascii_whitespace())
+            || v.contains('\'')
+            || v.contains('\\')
+        {
+            format!("'{}'", v.replace('\\', "\\\\").replace('\'', "\\'"))
+        } else {
+            v.to_string()
+        }
+    }
+    fn str_of(v: &Value) -> Option<String> {
+        match v {
+            Value::String(s) => Some(s.clone()),
+            Value::Number(n) => Some(n.to_string()),
+            Value::Bool(b) => Some(b.to_string()),
+            _ => None,
+        }
+    }
+    let mut parts: Vec<String> = Vec::new();
+    for key in ["host", "port", "dbname", "user", "password"] {
+        if let Some(v) = opts.get(key).filter(|v| !v.is_null()) {
+            if let Some(s) = str_of(v) {
+                parts.push(format!("{key}={}", quote(&s)));
+            }
+        }
+    }
+    if let Some(params) = opts.get("params").and_then(Value::as_object) {
+        let mut keys: Vec<&String> = params.keys().collect();
+        keys.sort();
+        for k in keys {
+            if let Some(s) = params.get(k).and_then(str_of) {
+                parts.push(format!("{k}={}", quote(&s)));
+            }
+        }
+    }
+    if parts.is_empty() {
+        return Err(anyhow!("no connection parameters provided"));
+    }
+    Ok(json!({ "dsn": parts.join(" ") }))
+}
+
 /// Build a URI DSN from explicit parts, percent-encoding userinfo/dbname and
 /// sanitizing the host with the same primitives the connector uses. Deterministic
 /// (no env lookups) — the inverse of `parse_dsn`. opts: user, password, host,
@@ -1827,6 +1878,11 @@ pub extern "C" fn pg__parse_dsn(args: *const c_char) -> *const c_char {
 #[no_mangle]
 pub extern "C" fn pg__parse_keyword_dsn(args: *const c_char) -> *const c_char {
     ffi_call(args, op_parse_keyword_dsn)
+}
+
+#[no_mangle]
+pub extern "C" fn pg__build_keyword_dsn(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_build_keyword_dsn)
 }
 
 #[no_mangle]
@@ -2861,6 +2917,42 @@ mod tests {
         assert!(op_parse_keyword_dsn(json!({"dsn": "host"})).is_err());
         assert!(op_parse_keyword_dsn(json!({"dsn": "host='localhost"})).is_err());
         assert!(op_parse_keyword_dsn(json!({})).is_err());
+    }
+
+    #[test]
+    fn build_keyword_dsn_inverts_parse_keyword_dsn() {
+        let dsn = |v: Value| {
+            op_build_keyword_dsn(v).unwrap()["dsn"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+        // Well-known keys emit first in canonical order; port stringifies.
+        assert_eq!(
+            dsn(
+                json!({"host": "db.example.com", "port": 6543, "dbname": "analytics", "user": "alice"})
+            ),
+            "host=db.example.com port=6543 dbname=analytics user=alice"
+        );
+        // params follow, sorted by key.
+        assert_eq!(
+            dsn(json!({"host": "h", "params": {"sslmode": "require", "connect_timeout": "10"}})),
+            "host=h connect_timeout=10 sslmode=require"
+        );
+        // A value with spaces or an empty value is single-quoted; `'`/`\` escaped.
+        assert_eq!(
+            dsn(json!({"password": "a b", "user": ""})),
+            "user='' password='a b'"
+        );
+        assert_eq!(dsn(json!({"password": "a'b\\c"})), "password='a\\'b\\\\c'");
+        // Round-trips parse_keyword_dsn for a realistic conninfo.
+        let original = "host=localhost port=5432 dbname=mydb user=foo sslmode=require";
+        let parsed = op_parse_keyword_dsn(json!({"dsn": original})).unwrap();
+        let rebuilt = op_build_keyword_dsn(parsed.clone()).unwrap();
+        let reparsed = op_parse_keyword_dsn(json!({"dsn": rebuilt["dsn"]})).unwrap();
+        assert_eq!(reparsed, parsed, "build → parse round-trips the fields");
+        // No parameters is an error.
+        assert!(op_build_keyword_dsn(json!({})).is_err());
     }
 
     #[test]
