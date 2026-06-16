@@ -578,6 +578,14 @@ fn Postgres::format_array ($elements) {
     Postgres::_decode("format_array", pg__format_array(to_json({ elements => $elements })))->{array}
 }
 
+## Build a parenthesized "IN (...)" operand from an arrayref of $values for a
+## `col IN (...)` predicate. Each value is rendered by type: a number stays bare,
+## a boolean → TRUE/FALSE, undef → NULL, a string is single-quoted. An empty list
+## yields "(NULL)" (matches nothing). Distinct from format_array's {…} = ANY form.
+fn Postgres::format_in_list ($values) {
+    Postgres::_decode("format_in_list", pg__format_in_list(to_json({ values => $values })))->{list}
+}
+
 ## Parse a one-dimensional Postgres array literal "{a,b,\"c,d\"}" into an
 ## arrayref of strings. Quoted elements are unescaped; an unquoted NULL becomes
 ## undef while a quoted "NULL" stays the string. Inverse of format_array.

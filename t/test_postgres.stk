@@ -272,6 +272,13 @@ assert_eq Postgres::format_array(["a", "b", "c"]), "{a,b,c}", "format_array: pla
 assert_eq Postgres::format_array(["a,b", "c d", "NULL"]), "{\"a,b\",\"c d\",\"NULL\"}", "format_array: comma/space/NULL forced to quote"
 assert_eq Postgres::format_array([]), "{}", "format_array: empty list"
 
+# format_in_list: parenthesized IN-clause operand (mixed types via quote_literal).
+assert_eq Postgres::format_in_list([1, 2, 3]),       "(1, 2, 3)",          "format_in_list: bare numbers"
+assert_eq Postgres::format_in_list(["a", q{O'Brien}]), q{('a', 'O''Brien')}, "format_in_list: strings quoted, '' doubled"
+assert_eq Postgres::format_in_list([1, "a", undef]), "(1, 'a', NULL)",      "format_in_list: mixed number/string/undef"
+assert_eq Postgres::format_in_list([]),              "(NULL)",              "format_in_list: empty → (NULL)"
+assert_dies fn { Postgres::format_in_list() }, "format_in_list: dies without values"
+
 # parse_array: Postgres array literal → arrayref (inverse of format_array).
 val $pa = Postgres::parse_array("{\"a,b\",\"c d\",\"NULL\",ok}")
 assert_eq $pa->[0], "a,b",  "parse_array: quoted comma element"

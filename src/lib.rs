@@ -1336,6 +1336,37 @@ fn op_format_array(opts: Value) -> Result<Value> {
     Ok(json!({"array": format!("{{{}}}", parts.join(","))}))
 }
 
+/// Build a parenthesized `IN (...)` operand from a list of `values` for a
+/// `col IN (...)` predicate. Each value is rendered by its JSON type — a number
+/// stays bare, a boolean becomes `TRUE`/`FALSE`, null becomes `NULL`, and a
+/// string is single-quoted (with `quote_literal`'s `''` escaping) — so the list
+/// can mix types. An empty list yields `(NULL)`, valid SQL that matches nothing
+/// (Postgres rejects a literal empty `IN ()`). Distinct from `format_array`,
+/// which builds the `{…}` array literal used with `= ANY(...)`. opts: `values`
+/// (or `elements`). Returns `{list}`. Pure.
+fn op_format_in_list(opts: Value) -> Result<Value> {
+    let values = opts
+        .get("values")
+        .or_else(|| opts.get("elements"))
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("missing values (array)"))?;
+    if values.is_empty() {
+        return Ok(json!({ "list": "(NULL)" }));
+    }
+    let parts: Vec<String> = values
+        .iter()
+        .map(|v| match v {
+            Value::Null => "NULL".to_string(),
+            Value::Number(n) => n.to_string(),
+            Value::Bool(true) => "TRUE".to_string(),
+            Value::Bool(false) => "FALSE".to_string(),
+            Value::String(s) => quote_lit(s),
+            other => quote_lit(&other.to_string()),
+        })
+        .collect();
+    Ok(json!({ "list": format!("({})", parts.join(", ")) }))
+}
+
 /// Parse a one-dimensional Postgres array literal `{a,b,"c,d"}` into a list of
 /// `elements`. Double-quoted elements are unescaped (`\"`→`"`, `\\`→`\`); an
 /// unquoted `NULL` (case-insensitive) becomes a JSON null while a quoted
@@ -1609,6 +1640,11 @@ pub extern "C" fn pg__unquote_dollar(args: *const c_char) -> *const c_char {
 #[no_mangle]
 pub extern "C" fn pg__format_array(args: *const c_char) -> *const c_char {
     ffi_call(args, op_format_array)
+}
+
+#[no_mangle]
+pub extern "C" fn pg__format_in_list(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_format_in_list)
 }
 
 #[no_mangle]
@@ -2824,6 +2860,36 @@ mod tests {
             json!("{}")
         );
         assert!(op_format_array(json!({})).is_err());
+    }
+
+    #[test]
+    fn format_in_list_renders_mixed_types_and_empty_sentinel() {
+        // Bare numbers.
+        assert_eq!(
+            op_format_in_list(json!({"values": [1, 2, 3]})).unwrap()["list"],
+            json!("(1, 2, 3)")
+        );
+        // Strings single-quoted, embedded quote doubled.
+        assert_eq!(
+            op_format_in_list(json!({"values": ["a", "O'Brien"]})).unwrap()["list"],
+            json!("('a', 'O''Brien')")
+        );
+        // Mixed number/string/bool/null.
+        assert_eq!(
+            op_format_in_list(json!({"values": [1, "a", true, null]})).unwrap()["list"],
+            json!("(1, 'a', TRUE, NULL)")
+        );
+        // Empty list → (NULL): valid SQL that matches nothing.
+        assert_eq!(
+            op_format_in_list(json!({"values": []})).unwrap()["list"],
+            json!("(NULL)")
+        );
+        // `elements` is accepted as an alias for `values`.
+        assert_eq!(
+            op_format_in_list(json!({"elements": [42]})).unwrap()["list"],
+            json!("(42)")
+        );
+        assert!(op_format_in_list(json!({})).is_err());
     }
 
     #[test]

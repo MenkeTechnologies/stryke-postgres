@@ -1,6 +1,6 @@
 [package]
 name = "stryke-postgres"
-version = "0.13.0"
+version = "0.14.0"
 description = "PostgreSQL client for stryke. cdylib loaded in-process — persistent postgres::Client per connection URL across calls."
 authors = ["MenkeTechnologies"]
 license = "MIT"
@@ -51,6 +51,7 @@ exports = [
     "pg__dollar_quote",
     "pg__unquote_dollar",
     "pg__format_array",
+    "pg__format_in_list",
     "pg__parse_array",
 ]
 
