@@ -232,6 +232,13 @@ assert_eq Postgres::unquote_literal(Postgres::quote_literal("a'b'c")), "a'b'c", 
 assert_dies fn { Postgres::unquote_literal("noquotes") }, "unquote_literal: rejects a non-quoted value"
 assert_dies fn { Postgres::unquote_literal("'a'b'") }, "unquote_literal: rejects an unpaired internal quote"
 
+# dollar_quote: $tag$...$tag$ wrapping with an auto non-colliding tag.
+assert_eq Postgres::dollar_quote(q{Dianne's horse}), q{$$Dianne's horse$$}, "dollar_quote: empty tag when no collision"
+assert_eq Postgres::dollar_quote(q{a $$ b}),          q{$dq0$a $$ b$dq0$},  "dollar_quote: auto tag avoids the $$ collision"
+assert_eq Postgres::dollar_quote(q{body}, q{fn}),     q{$fn$body$fn$},      "dollar_quote: explicit tag"
+assert_dies fn { Postgres::dollar_quote(q{has $fn$ inside}, q{fn}) }, "dollar_quote: explicit tag colliding with content dies"
+assert_dies fn { Postgres::dollar_quote(q{x}, q{bad$tag}) }, "dollar_quote: a tag with a dollar sign dies"
+
 # quote_qualified_ident: each dot-separated segment quoted independently.
 assert_eq Postgres::quote_qualified_ident("public.my table"), "\"public\".\"my table\"", "quote_qualified_ident quotes each segment"
 assert_eq Postgres::quote_qualified_ident("users"), "\"users\"", "quote_qualified_ident: bare identifier still quoted"

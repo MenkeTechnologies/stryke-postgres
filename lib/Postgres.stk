@@ -554,6 +554,14 @@ fn Postgres::unquote_literal ($value) {
     Postgres::_decode("unquote_literal", pg__unquote_literal(to_json({ value => $value })))->{value}
 }
 
+## Dollar-quote $value as $tag$value$tag$ — no escaping needed (backslashes and
+## quotes are literal), ideal for function bodies / JSON. With no $tag a
+## non-colliding one is auto-picked (empty $$..$$ when possible, else $dq0$, …).
+## Returns the quoted string.
+fn Postgres::dollar_quote ($value, $tag = undef) {
+    Postgres::_decode("dollar_quote", pg__dollar_quote(to_json({ value => $value, tag => $tag })))->{quoted}
+}
+
 ## Build a Postgres array literal "{a,b,c}" from an arrayref of strings. An
 ## element is double-quoted (with " and \ escaped) when it is empty, contains
 ## ,{}"\ or whitespace, or equals NULL case-insensitively. Wrap the result with

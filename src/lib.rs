@@ -1219,6 +1219,58 @@ fn op_unquote_literal(opts: Value) -> Result<Value> {
     Ok(json!({ "value": inner.replace("''", "'") }))
 }
 
+/// A legal dollar-quote tag: empty, or an unquoted-identifier form (ASCII letter
+/// or `_` start, then letters/digits/`_`) with no `$`.
+fn valid_dollar_tag(t: &str) -> bool {
+    if t.is_empty() {
+        return true;
+    }
+    let b = t.as_bytes();
+    (b[0].is_ascii_alphabetic() || b[0] == b'_')
+        && t.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_')
+}
+
+/// Postgres dollar-quoting: wrap `value` as `$tag$value$tag$` so it needs no
+/// escaping at all — backslashes and quotes are literal — the form used for
+/// function bodies, JSON, and strings full of quotes (`quote_literal` only does
+/// standard `'…'` doubling). With no `tag`, a non-colliding one is chosen
+/// automatically: the empty tag (`$$…$$`) when the content has no `$$`, otherwise
+/// `$dq0$`, `$dq1$`, … An explicit `tag` must follow identifier rules and contain
+/// no `$`, and the content must not already contain its `$tag$` delimiter. opts:
+/// `value` (required), optional `tag`. Returns `{quoted, tag}`. Pure.
+fn op_dollar_quote(opts: Value) -> Result<Value> {
+    let value = opts
+        .get("value")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing value"))?;
+    let tag = match opts.get("tag").and_then(Value::as_str) {
+        Some(t) => {
+            if !valid_dollar_tag(t) {
+                bail!("dollar-quote tag `{t}` must be an identifier with no `$`");
+            }
+            if value.contains(&format!("${t}$")) {
+                bail!("value contains the `${t}$` delimiter; choose another tag");
+            }
+            t.to_string()
+        }
+        None => {
+            let mut i: u32 = 0;
+            loop {
+                let t = if i == 0 {
+                    String::new()
+                } else {
+                    format!("dq{}", i - 1)
+                };
+                if !value.contains(&format!("${t}$")) {
+                    break t;
+                }
+                i += 1;
+            }
+        }
+    };
+    Ok(json!({ "quoted": format!("${tag}${value}${tag}$"), "tag": tag }))
+}
+
 /// Build a Postgres array literal `{a,b,c}` from a list of string `elements`,
 /// following the input syntax: an element is double-quoted (with `"` and `\`
 /// backslash-escaped) when it is empty, contains `,{}"\` or whitespace, or
@@ -1508,6 +1560,11 @@ pub extern "C" fn pg__quote_nullable(args: *const c_char) -> *const c_char {
 #[no_mangle]
 pub extern "C" fn pg__unquote_literal(args: *const c_char) -> *const c_char {
     ffi_call(args, op_unquote_literal)
+}
+
+#[no_mangle]
+pub extern "C" fn pg__dollar_quote(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_dollar_quote)
 }
 
 #[no_mangle]
@@ -2562,6 +2619,35 @@ mod tests {
         // Not single-quoted, and an unpaired internal quote, both reject.
         assert!(op_unquote_literal(json!({"value": "noquotes"})).is_err());
         assert!(op_unquote_literal(json!({"value": "'a'b'"})).is_err());
+    }
+
+    #[test]
+    fn dollar_quote_wraps_and_auto_picks_a_non_colliding_tag() {
+        // No collision → the empty tag ($$…$$); quotes/backslashes stay literal.
+        let v = op_dollar_quote(json!({"value": "Dianne's horse \\ \"q\""})).unwrap();
+        assert_eq!(v["tag"], json!(""));
+        assert_eq!(v["quoted"], json!("$$Dianne's horse \\ \"q\"$$"));
+        // Content containing `$$` forces a non-empty auto tag.
+        let c = op_dollar_quote(json!({"value": "a $$ b"})).unwrap();
+        assert_eq!(c["tag"], json!("dq0"));
+        assert_eq!(c["quoted"], json!("$dq0$a $$ b$dq0$"));
+        // If even `$dq0$` appears, the next tag is chosen.
+        let c2 = op_dollar_quote(json!({"value": "x $$ y $dq0$ z"})).unwrap();
+        assert_eq!(c2["tag"], json!("dq1"));
+        assert_eq!(c2["quoted"], json!("$dq1$x $$ y $dq0$ z$dq1$"));
+        // Explicit tag.
+        let e = op_dollar_quote(json!({"value": "body", "tag": "fn"})).unwrap();
+        assert_eq!(e["quoted"], json!("$fn$body$fn$"));
+        // A bare `$` in the content is fine (it's not the delimiter).
+        assert_eq!(
+            op_dollar_quote(json!({"value": "price is $5"})).unwrap()["quoted"],
+            json!("$$price is $5$$")
+        );
+        // Explicit tag that collides with the content, or is not a legal tag.
+        assert!(op_dollar_quote(json!({"value": "has $fn$ inside", "tag": "fn"})).is_err());
+        assert!(op_dollar_quote(json!({"value": "x", "tag": "bad$tag"})).is_err());
+        assert!(op_dollar_quote(json!({"value": "x", "tag": "1leading"})).is_err());
+        assert!(op_dollar_quote(json!({})).is_err());
     }
 
     #[test]
