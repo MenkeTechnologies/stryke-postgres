@@ -1055,6 +1055,28 @@ fn op_quote_ident(opts: Value) -> Result<Value> {
     Ok(json!({"quoted": quote_ident(name)}))
 }
 
+/// Decode a double-quoted Postgres identifier back to its raw name — the inverse
+/// of `quote_ident`. The input must be wrapped in matching `"` with every
+/// embedded quote doubled (`""` → `"`); an unpaired quote is rejected. opts:
+/// `quoted` (or `ident`). Returns `{name}`. Pure.
+fn op_unquote_ident(opts: Value) -> Result<Value> {
+    let input = opts
+        .get("quoted")
+        .or_else(|| opts.get("ident"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing quoted"))?;
+    let inner = input
+        .strip_prefix('"')
+        .and_then(|s| s.strip_suffix('"'))
+        .filter(|_| input.len() >= 2)
+        .ok_or_else(|| anyhow!("not a double-quoted identifier: {input}"))?;
+    // Every embedded quote must be doubled — an odd count means a stray one.
+    if inner.matches('"').count() % 2 != 0 {
+        return Err(anyhow!("malformed identifier: unpaired quote in {input}"));
+    }
+    Ok(json!({ "name": inner.replace("\"\"", "\"") }))
+}
+
 /// Quote a dotted, schema-qualified identifier: each dot-separated segment is
 /// quoted independently and rejoined with `.`, so `public.my table` becomes
 /// `"public"."my table"`. A literal dot inside a segment must be escaped by the
@@ -1456,6 +1478,11 @@ pub extern "C" fn pg__build_dsn(args: *const c_char) -> *const c_char {
 #[no_mangle]
 pub extern "C" fn pg__quote_ident(args: *const c_char) -> *const c_char {
     ffi_call(args, op_quote_ident)
+}
+
+#[no_mangle]
+pub extern "C" fn pg__unquote_ident(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_unquote_ident)
 }
 
 #[no_mangle]
@@ -2449,6 +2476,37 @@ mod tests {
         assert_eq!(id["quoted"], json!("\"weird\"\"col\""));
         let lit = op_quote_literal(json!({"value": "O'Brien"})).unwrap();
         assert_eq!(lit["quoted"], json!("'O''Brien'"));
+    }
+
+    #[test]
+    fn unquote_ident_inverts_quote_ident() {
+        // Doubled quote decodes to one.
+        assert_eq!(
+            op_unquote_ident(json!({"quoted": "\"weird\"\"col\""})).unwrap()["name"],
+            json!("weird\"col")
+        );
+        // Plain and empty quoted names.
+        assert_eq!(
+            op_unquote_ident(json!({"quoted": "\"plain\""})).unwrap()["name"],
+            json!("plain")
+        );
+        assert_eq!(
+            op_unquote_ident(json!({"quoted": "\"\""})).unwrap()["name"],
+            json!("")
+        );
+        // Round-trips quote_ident for any input.
+        for raw in ["table", "weird\"col", "has space", "MixedCase"] {
+            let q = op_quote_ident(json!({ "name": raw })).unwrap()["quoted"].clone();
+            assert_eq!(
+                op_unquote_ident(json!({ "quoted": q })).unwrap()["name"],
+                json!(raw),
+                "round-trip {raw:?}"
+            );
+        }
+        // Not quoted / unpaired quote reject.
+        assert!(op_unquote_ident(json!({"quoted": "plain"})).is_err());
+        assert!(op_unquote_ident(json!({"quoted": "\"a\"b\""})).is_err());
+        assert!(op_unquote_ident(json!({})).is_err());
     }
 
     #[test]

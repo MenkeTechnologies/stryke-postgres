@@ -513,6 +513,13 @@ fn Postgres::quote_ident ($name) {
     Postgres::_decode("quote_ident", pg__quote_ident(to_json({ name => $name })))->{quoted}
 }
 
+## Decode a double-quoted Postgres identifier back to its raw name — inverse of
+## quote_ident (strips the quotes, un-doubles embedded ""). Dies on an unquoted
+## input or an unpaired quote.
+fn Postgres::unquote_ident ($quoted) {
+    Postgres::_decode("unquote_ident", pg__unquote_ident(to_json({ quoted => $quoted })))->{name}
+}
+
 ## Quote a dotted, schema-qualified identifier — each "."-separated segment is
 ## quoted independently and rejoined, so "public.my table" → "public"."my table".
 ## Empty segments (leading/trailing/doubled dot) are rejected.

@@ -261,6 +261,7 @@ Pure helpers — connection-string and quoting utilities that open no socket:
 Postgres::parse_dsn($dsn)      → { scheme, user, password, host, port, dbname, params }
 Postgres::build_dsn(%opts)     → $dsn        # parts → URI DSN; inverse of parse_dsn
 Postgres::quote_ident($name)   → $quoted     # "weird""col"
+Postgres::unquote_ident($quoted) → $name     # inverse of quote_ident: strip quotes, un-double
 Postgres::quote_qualified_ident($name) → $quoted  # public.my table → "public"."my table"
 Postgres::parse_qualified_ident($name) → \@parts  # "public"."my table" → ["public","my table"]; inverse of quote_qualified_ident
 Postgres::quote_literal($val)  → $quoted     # 'O''Brien'

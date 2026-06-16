@@ -212,6 +212,13 @@ assert_eq $rt->{dbname},   "app",   "build_dsn → parse_dsn dbname"
 assert_eq Postgres::quote_ident("weird\"col"), "\"weird\"\"col\"", "quote_ident doubles quotes"
 assert_eq Postgres::quote_literal("O'Brien"),  "'O''Brien'",       "quote_literal doubles apostrophes"
 
+# unquote_ident: inverse of quote_ident (strip quotes, un-double "").
+assert_eq Postgres::unquote_ident("\"weird\"\"col\""), "weird\"col", "unquote_ident: doubled quote decodes to one"
+assert_eq Postgres::unquote_ident("\"plain\""),        "plain",      "unquote_ident: plain quoted name"
+assert_eq Postgres::unquote_ident(Postgres::quote_ident("has space")), "has space", "unquote_ident: round-trips quote_ident"
+assert_dies fn { Postgres::unquote_ident("plain") },     "unquote_ident: rejects an unquoted name"
+assert_dies fn { Postgres::unquote_ident("\"a\"b\"") },  "unquote_ident: rejects an unpaired quote"
+
 # quote_nullable: like quote_literal but undef → NULL.
 assert_eq Postgres::quote_nullable("O'Brien"), "'O''Brien'",       "quote_nullable: quotes a string like quote_literal"
 assert_eq Postgres::quote_nullable(undef),     "NULL",             "quote_nullable: undef → unquoted NULL"
