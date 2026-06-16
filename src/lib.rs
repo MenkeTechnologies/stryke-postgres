@@ -1194,6 +1194,28 @@ fn op_quote_nullable(opts: Value) -> Result<Value> {
     }
 }
 
+/// Escape a literal string for safe use inside a Postgres `LIKE`/`ILIKE` pattern.
+/// The wildcard metacharacters `%` (any sequence) and `_` (any single character),
+/// plus the default escape character `\`, are each backslash-escaped so the value
+/// matches itself exactly — e.g. `col LIKE escape_like(s) || '%'` for a prefix
+/// match. The `\` escape needs no explicit `ESCAPE` clause (it is the default).
+/// The pattern-matching companion of `quote_literal`. opts: `value` (required).
+/// Returns `{value, escaped}`. Pure.
+fn op_escape_like(opts: Value) -> Result<Value> {
+    let value = opts
+        .get("value")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing value"))?;
+    let mut out = String::with_capacity(value.len());
+    for c in value.chars() {
+        if c == '\\' || c == '%' || c == '_' {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    Ok(json!({"value": value, "escaped": out}))
+}
+
 /// Decode a standard single-quoted Postgres string literal back to its raw value
 /// — the inverse of `quote_literal`. Under `standard_conforming_strings` (the
 /// default), the only escape inside `'…'` is a doubled quote `''` → `'`, with no
@@ -1610,6 +1632,11 @@ pub extern "C" fn pg__quote_qualified_ident(args: *const c_char) -> *const c_cha
 #[no_mangle]
 pub extern "C" fn pg__parse_qualified_ident(args: *const c_char) -> *const c_char {
     ffi_call(args, op_parse_qualified_ident)
+}
+
+#[no_mangle]
+pub extern "C" fn pg__escape_like(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_escape_like)
 }
 
 #[no_mangle]
@@ -2694,6 +2721,27 @@ mod tests {
         // Not single-quoted, and an unpaired internal quote, both reject.
         assert!(op_unquote_literal(json!({"value": "noquotes"})).is_err());
         assert!(op_unquote_literal(json!({"value": "'a'b'"})).is_err());
+    }
+
+    #[test]
+    fn escape_like_backslash_escapes_wildcards() {
+        let e = |s: &str| {
+            op_escape_like(json!({ "value": s })).unwrap()["escaped"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+        // Plain text is unchanged.
+        assert_eq!(e("hello"), "hello");
+        // The two LIKE wildcards and the escape char itself are backslash-escaped.
+        assert_eq!(e("100%"), "100\\%");
+        assert_eq!(e("a_b"), "a\\_b");
+        assert_eq!(e("a\\b"), "a\\\\b");
+        // A realistic mix.
+        assert_eq!(e("50%_off\\sale"), "50\\%\\_off\\\\sale");
+        // Empty string stays empty; missing arg errors.
+        assert_eq!(e(""), "");
+        assert!(op_escape_like(json!({})).is_err());
     }
 
     #[test]

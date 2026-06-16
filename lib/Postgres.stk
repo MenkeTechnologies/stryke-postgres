@@ -541,6 +541,14 @@ fn Postgres::quote_literal ($value) {
     Postgres::_decode("quote_literal", pg__quote_literal(to_json({ value => $value })))->{quoted}
 }
 
+## Escape a literal string for a LIKE/ILIKE pattern: the wildcards % and _ and the
+## default escape char \ are each backslash-escaped so $value matches itself
+## exactly (e.g. col LIKE Postgres::escape_like($s) . '%' for a prefix match).
+## Returns the escaped string.
+fn Postgres::escape_like ($value) {
+    Postgres::_decode("escape_like", pg__escape_like(to_json({ value => $value })))->{escaped}
+}
+
 ## Postgres quote_nullable: like quote_literal, but undef → the unquoted text
 ## NULL — safe to inline a possibly-null value directly into SQL.
 fn Postgres::quote_nullable ($value = undef) {
