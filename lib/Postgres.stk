@@ -562,6 +562,14 @@ fn Postgres::dollar_quote ($value, $tag = undef) {
     Postgres::_decode("dollar_quote", pg__dollar_quote(to_json({ value => $value, tag => $tag })))->{quoted}
 }
 
+## Decode a dollar-quoted string $tag$value$tag$ back to its raw content —
+## inverse of dollar_quote (unquote_literal only handles '…'). The opening tag is
+## validated and the string must end with the same $tag$ delimiter; content is
+## returned verbatim (dollar quoting does no escaping). Returns the raw value.
+fn Postgres::unquote_dollar ($value) {
+    Postgres::_decode("unquote_dollar", pg__unquote_dollar(to_json({ value => $value })))->{value}
+}
+
 ## Build a Postgres array literal "{a,b,c}" from an arrayref of strings. An
 ## element is double-quoted (with " and \ escaped) when it is empty, contains
 ## ,{}"\ or whitespace, or equals NULL case-insensitively. Wrap the result with

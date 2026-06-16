@@ -1271,6 +1271,40 @@ fn op_dollar_quote(opts: Value) -> Result<Value> {
     Ok(json!({ "quoted": format!("${tag}${value}${tag}$"), "tag": tag }))
 }
 
+/// Decode a Postgres dollar-quoted string `$tag$value$tag$` back to its raw
+/// content — the inverse of `dollar_quote` (which `unquote_literal`, handling
+/// only `'…'`, can't). The opening tag is the run between the first two `$`; it
+/// must be a legal dollar-quote tag (empty or identifier-form, no `$`) and the
+/// string must end with the identical `$tag$` delimiter. The content is returned
+/// verbatim — no un-escaping, since dollar quoting does none. A delimiter
+/// appearing inside the body is rejected as malformed (Postgres would have closed
+/// the literal there). opts: `value` (or `quoted`). Returns `{value, tag}`. Pure.
+fn op_unquote_dollar(opts: Value) -> Result<Value> {
+    let input = opts
+        .get("value")
+        .or_else(|| opts.get("quoted"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing value"))?;
+    let rest = input
+        .strip_prefix('$')
+        .ok_or_else(|| anyhow!("not a dollar-quoted string: {input}"))?;
+    let tag_end = rest
+        .find('$')
+        .ok_or_else(|| anyhow!("unterminated dollar-quote opening tag: {input}"))?;
+    let tag = &rest[..tag_end];
+    if !valid_dollar_tag(tag) {
+        bail!("invalid dollar-quote tag `{tag}` in {input}");
+    }
+    let delim = format!("${tag}$");
+    let body = rest[tag_end + 1..]
+        .strip_suffix(&delim)
+        .ok_or_else(|| anyhow!("dollar-quoted string not closed by `{delim}`: {input}"))?;
+    if body.contains(&delim) {
+        bail!("dollar-quoted body contains its own delimiter `{delim}`: {input}");
+    }
+    Ok(json!({ "value": body, "tag": tag }))
+}
+
 /// Build a Postgres array literal `{a,b,c}` from a list of string `elements`,
 /// following the input syntax: an element is double-quoted (with `"` and `\`
 /// backslash-escaped) when it is empty, contains `,{}"\` or whitespace, or
@@ -1565,6 +1599,11 @@ pub extern "C" fn pg__unquote_literal(args: *const c_char) -> *const c_char {
 #[no_mangle]
 pub extern "C" fn pg__dollar_quote(args: *const c_char) -> *const c_char {
     ffi_call(args, op_dollar_quote)
+}
+
+#[no_mangle]
+pub extern "C" fn pg__unquote_dollar(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_unquote_dollar)
 }
 
 #[no_mangle]
@@ -2648,6 +2687,59 @@ mod tests {
         assert!(op_dollar_quote(json!({"value": "x", "tag": "bad$tag"})).is_err());
         assert!(op_dollar_quote(json!({"value": "x", "tag": "1leading"})).is_err());
         assert!(op_dollar_quote(json!({})).is_err());
+    }
+
+    #[test]
+    fn unquote_dollar_inverts_dollar_quote() {
+        // Empty-tag form, content with quotes/backslashes returned verbatim.
+        let v = op_unquote_dollar(json!({"value": "$$Dianne's horse \\ \"q\"$$"})).unwrap();
+        assert_eq!(v["tag"], json!(""));
+        assert_eq!(v["value"], json!("Dianne's horse \\ \"q\""));
+        // Named tag.
+        let n = op_unquote_dollar(json!({"value": "$fn$body$fn$"})).unwrap();
+        assert_eq!(n["tag"], json!("fn"));
+        assert_eq!(n["value"], json!("body"));
+        // Empty body.
+        assert_eq!(
+            op_unquote_dollar(json!({"value": "$$$$"})).unwrap()["value"],
+            json!("")
+        );
+        assert_eq!(
+            op_unquote_dollar(json!({"value": "$t$$t$"})).unwrap()["value"],
+            json!("")
+        );
+        // A bare `$` and a different `$$` inside a named tag are fine.
+        assert_eq!(
+            op_unquote_dollar(json!({"value": "$outer$ has $$ and $5 $outer$"})).unwrap()["value"],
+            json!(" has $$ and $5 ")
+        );
+        // Round-trips dollar_quote for tricky content (including auto-tag choice).
+        for raw in [
+            "plain",
+            "Dianne's",
+            "a $$ b",
+            "x $$ y $dq0$ z",
+            "",
+            "price is $5",
+        ] {
+            let q = op_dollar_quote(json!({ "value": raw })).unwrap()["quoted"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            assert_eq!(
+                op_unquote_dollar(json!({ "value": q })).unwrap()["value"],
+                json!(raw),
+                "round-trip for {raw:?}"
+            );
+        }
+        // Errors: no leading `$`, unterminated tag, wrong/absent closing delim,
+        // illegal tag, and a body that re-contains its own delimiter.
+        assert!(op_unquote_dollar(json!({"value": "noquotes"})).is_err());
+        assert!(op_unquote_dollar(json!({"value": "$tag"})).is_err());
+        assert!(op_unquote_dollar(json!({"value": "$fn$body$other$"})).is_err());
+        assert!(op_unquote_dollar(json!({"value": "$fn$"})).is_err());
+        assert!(op_unquote_dollar(json!({"value": "$1bad$x$1bad$"})).is_err());
+        assert!(op_unquote_dollar(json!({})).is_err());
     }
 
     #[test]

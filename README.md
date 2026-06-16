@@ -268,6 +268,7 @@ Postgres::quote_literal($val)  → $quoted     # 'O''Brien'
 Postgres::quote_nullable($val) → $quoted     # like quote_literal, but undef → NULL (unquoted)
 Postgres::unquote_literal($lit) → $val       # 'O''Brien' → O'Brien; inverse of quote_literal (standard mode)
 Postgres::dollar_quote($val, $tag?) → $quoted  # $tag$val$tag$ (no escaping); auto-picks a non-colliding tag ($$..$$ or $dq0$, …)
+Postgres::unquote_dollar($quoted) → $val      # inverse of dollar_quote: $tag$val$tag$ → val (content verbatim)
 Postgres::format_array(\@elems) → $literal    # ["a,b","c"] → {"a,b",c} (Postgres array input syntax)
 Postgres::parse_array($literal) → \@elems     # {"a,b",NULL,c} → ["a,b",undef,"c"]; inverse of format_array (1-D)
 ```

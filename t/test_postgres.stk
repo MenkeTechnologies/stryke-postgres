@@ -239,6 +239,18 @@ assert_eq Postgres::dollar_quote(q{body}, q{fn}),     q{$fn$body$fn$},      "dol
 assert_dies fn { Postgres::dollar_quote(q{has $fn$ inside}, q{fn}) }, "dollar_quote: explicit tag colliding with content dies"
 assert_dies fn { Postgres::dollar_quote(q{x}, q{bad$tag}) }, "dollar_quote: a tag with a dollar sign dies"
 
+# unquote_dollar: inverse of dollar_quote.
+assert_eq Postgres::unquote_dollar(q{$$Dianne's horse$$}), q{Dianne's horse}, "unquote_dollar: empty tag, content verbatim"
+assert_eq Postgres::unquote_dollar(q{$fn$body$fn$}),       q{body},           "unquote_dollar: named tag"
+assert_eq Postgres::unquote_dollar(q{$$$$}),               q{},               "unquote_dollar: empty body"
+assert_eq Postgres::unquote_dollar(q{$outer$ has $$ and $5 $outer$}), q{ has $$ and $5 }, "unquote_dollar: inner $$ / $5 stay literal under a named tag"
+# Round-trips dollar_quote, including the auto-tag path.
+for val $raw (q{plain}, q{Dianne's}, q{a $$ b}, q{x $$ y $dq0$ z}) {
+    assert_eq Postgres::unquote_dollar(Postgres::dollar_quote($raw)), $raw, "unquote_dollar: round-trips dollar_quote($raw)"
+}
+assert_dies fn { Postgres::unquote_dollar(q{noquotes}) },        "unquote_dollar: rejects a non-dollar-quoted string"
+assert_dies fn { Postgres::unquote_dollar(q{$fn$body$other$}) }, "unquote_dollar: rejects a mismatched closing tag"
+
 # quote_qualified_ident: each dot-separated segment quoted independently.
 assert_eq Postgres::quote_qualified_ident("public.my table"), "\"public\".\"my table\"", "quote_qualified_ident quotes each segment"
 assert_eq Postgres::quote_qualified_ident("users"), "\"users\"", "quote_qualified_ident: bare identifier still quoted"
