@@ -266,6 +266,7 @@ Postgres::quote_qualified_ident($name) → $quoted  # public.my table → "publi
 Postgres::parse_qualified_ident($name) → \@parts  # "public"."my table" → ["public","my table"]; inverse of quote_qualified_ident
 Postgres::quote_literal($val)  → $quoted     # 'O''Brien'
 Postgres::escape_like($val)    → $escaped    # backslash-escape LIKE wildcards: 100% → 100\%, a_b → a\_b, \ → \\
+Postgres::unescape_like($pat)  → $literal    # inverse: recover the literal (100\% → 100%); rejects an unescaped wildcard or dangling backslash
 Postgres::quote_nullable($val) → $quoted     # like quote_literal, but undef → NULL (unquoted)
 Postgres::unquote_literal($lit) → $val       # 'O''Brien' → O'Brien; inverse of quote_literal (standard mode)
 Postgres::dollar_quote($val, $tag?) → $quoted  # $tag$val$tag$ (no escaping); auto-picks a non-colliding tag ($$..$$ or $dq0$, …)

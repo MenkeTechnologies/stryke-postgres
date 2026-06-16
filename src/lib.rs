@@ -1216,6 +1216,38 @@ fn op_escape_like(opts: Value) -> Result<Value> {
     Ok(json!({"value": value, "escaped": out}))
 }
 
+/// Recover the literal text from a LIKE pattern that `escape_like` produced — its
+/// inverse. Under the default `\` escape character, `\%`→`%`, `\_`→`_`, `\\`→`\`;
+/// a backslash before any other character is an invalid escape, and an
+/// *unescaped* wildcard (`%`/`_`) or a dangling trailing backslash means the
+/// input is a real pattern, not an escaped literal, so both are rejected. This
+/// makes `unescape_like(escape_like(s)) == s` for every `s`. opts: `value`
+/// (required). Returns `{value, unescaped}`. Pure.
+fn op_unescape_like(opts: Value) -> Result<Value> {
+    let value = opts
+        .get("value")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing value"))?;
+    let mut out = String::with_capacity(value.len());
+    let mut chars = value.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => match chars.next() {
+                Some(n @ ('\\' | '%' | '_')) => out.push(n),
+                Some(n) => return Err(anyhow!("invalid escape sequence `\\{n}`")),
+                None => return Err(anyhow!("dangling escape: trailing backslash")),
+            },
+            '%' | '_' => {
+                return Err(anyhow!(
+                    "unescaped wildcard `{c}`: not a LIKE-escaped literal"
+                ))
+            }
+            _ => out.push(c),
+        }
+    }
+    Ok(json!({"value": value, "unescaped": out}))
+}
+
 /// Decode a standard single-quoted Postgres string literal back to its raw value
 /// — the inverse of `quote_literal`. Under `standard_conforming_strings` (the
 /// default), the only escape inside `'…'` is a doubled quote `''` → `'`, with no
@@ -1637,6 +1669,11 @@ pub extern "C" fn pg__parse_qualified_ident(args: *const c_char) -> *const c_cha
 #[no_mangle]
 pub extern "C" fn pg__escape_like(args: *const c_char) -> *const c_char {
     ffi_call(args, op_escape_like)
+}
+
+#[no_mangle]
+pub extern "C" fn pg__unescape_like(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_unescape_like)
 }
 
 #[no_mangle]
@@ -2742,6 +2779,35 @@ mod tests {
         // Empty string stays empty; missing arg errors.
         assert_eq!(e(""), "");
         assert!(op_escape_like(json!({})).is_err());
+    }
+
+    #[test]
+    fn unescape_like_inverts_escape_like() {
+        let u = |s: &str| {
+            op_unescape_like(json!({ "value": s })).unwrap()["unescaped"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+        assert_eq!(u("hello"), "hello");
+        assert_eq!(u("100\\%"), "100%");
+        assert_eq!(u("a\\_b"), "a_b");
+        assert_eq!(u("a\\\\b"), "a\\b");
+        assert_eq!(u(""), "");
+        // Round-trips escape_like for every kind of input.
+        for s in ["hello", "100%", "a_b", "a\\b", "50%_off\\sale", ""] {
+            let esc = op_escape_like(json!({ "value": s })).unwrap()["escaped"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            assert_eq!(u(&esc), s, "round-trip {s:?}");
+        }
+        // An unescaped wildcard, a dangling backslash, and a bogus escape are rejected.
+        assert!(op_unescape_like(json!({ "value": "a%b" })).is_err());
+        assert!(op_unescape_like(json!({ "value": "a_b" })).is_err());
+        assert!(op_unescape_like(json!({ "value": "trail\\" })).is_err());
+        assert!(op_unescape_like(json!({ "value": "a\\b" })).is_err());
+        assert!(op_unescape_like(json!({})).is_err());
     }
 
     #[test]

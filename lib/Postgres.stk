@@ -549,6 +549,14 @@ fn Postgres::escape_like ($value) {
     Postgres::_decode("escape_like", pg__escape_like(to_json({ value => $value })))->{escaped}
 }
 
+## Inverse of escape_like: recover the literal from a LIKE pattern that
+## escape_like produced (\% → %, \_ → _, \\ → \). Rejects an unescaped wildcard
+## or a dangling backslash — those mean a real pattern, not a LIKE-escaped
+## literal. Returns the recovered string.
+fn Postgres::unescape_like ($value) {
+    Postgres::_decode("unescape_like", pg__unescape_like(to_json({ value => $value })))->{unescaped}
+}
+
 ## Postgres quote_nullable: like quote_literal, but undef → the unquoted text
 ## NULL — safe to inline a possibly-null value directly into SQL.
 fn Postgres::quote_nullable ($value = undef) {

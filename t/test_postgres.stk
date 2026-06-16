@@ -219,6 +219,15 @@ assert_eq Postgres::escape_like("a_b"),    "a\\_b",         "escape_like: unders
 assert_eq Postgres::escape_like("a\\b"),   "a\\\\b",        "escape_like: the escape char itself is doubled"
 assert_eq Postgres::escape_like("50%_x"),  "50\\%\\_x",     "escape_like: both wildcards in one value"
 
+# unescape_like: inverse of escape_like — recover the literal.
+assert_eq Postgres::unescape_like("plain"),     "plain", "unescape_like: plain text unchanged"
+assert_eq Postgres::unescape_like("100\\%"),    "100%",  "unescape_like: escaped percent decodes to literal"
+assert_eq Postgres::unescape_like("a\\_b"),     "a_b",   "unescape_like: escaped underscore decodes to literal"
+assert_eq Postgres::unescape_like("a\\\\b"),    "a\\b",  "unescape_like: doubled backslash decodes to one"
+assert_eq Postgres::unescape_like(Postgres::escape_like("50%_off\\sale")), "50%_off\\sale", "unescape_like: round-trips escape_like"
+assert_dies fn { Postgres::unescape_like("a%b") },   "unescape_like: rejects an unescaped wildcard"
+assert_dies fn { Postgres::unescape_like("trail\\") }, "unescape_like: rejects a dangling backslash"
+
 # unquote_ident: inverse of quote_ident (strip quotes, un-double "").
 assert_eq Postgres::unquote_ident("\"weird\"\"col\""), "weird\"col", "unquote_ident: doubled quote decodes to one"
 assert_eq Postgres::unquote_ident("\"plain\""),        "plain",      "unquote_ident: plain quoted name"
