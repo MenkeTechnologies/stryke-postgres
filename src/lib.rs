@@ -1142,12 +1142,34 @@ fn op_parse_qualified_ident(opts: Value) -> Result<Value> {
 /// Quote a SQL string literal (single-quote, doubling embedded quotes). Pure —
 /// assumes `standard_conforming_strings` (Postgres default), so backslashes are
 /// literal.
+/// Quote a string as a standard single-quoted Postgres literal, doubling every
+/// embedded quote. Shared by `quote_literal` and `quote_nullable`.
+fn quote_lit(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "''"))
+}
+
 fn op_quote_literal(opts: Value) -> Result<Value> {
     let value = opts
         .get("value")
         .and_then(Value::as_str)
         .ok_or_else(|| anyhow!("missing value"))?;
-    Ok(json!({"quoted": format!("'{}'", value.replace('\'', "''"))}))
+    Ok(json!({"quoted": quote_lit(value)}))
+}
+
+/// Postgres `quote_nullable`: like `quote_literal`, but a NULL (absent or null
+/// `value`) yields the unquoted text `NULL` rather than a quoted string — so it
+/// is safe to inline a possibly-null value directly into SQL. opts: `value`
+/// (string or null). Returns `{quoted}`. Pure.
+fn op_quote_nullable(opts: Value) -> Result<Value> {
+    match opts.get("value") {
+        None | Some(Value::Null) => Ok(json!({"quoted": "NULL"})),
+        Some(v) => {
+            let s = v
+                .as_str()
+                .ok_or_else(|| anyhow!("value must be a string or null"))?;
+            Ok(json!({"quoted": quote_lit(s)}))
+        }
+    }
 }
 
 /// Decode a standard single-quoted Postgres string literal back to its raw value
@@ -1449,6 +1471,11 @@ pub extern "C" fn pg__parse_qualified_ident(args: *const c_char) -> *const c_cha
 #[no_mangle]
 pub extern "C" fn pg__quote_literal(args: *const c_char) -> *const c_char {
     ffi_call(args, op_quote_literal)
+}
+
+#[no_mangle]
+pub extern "C" fn pg__quote_nullable(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_quote_nullable)
 }
 
 #[no_mangle]
@@ -2422,6 +2449,26 @@ mod tests {
         assert_eq!(id["quoted"], json!("\"weird\"\"col\""));
         let lit = op_quote_literal(json!({"value": "O'Brien"})).unwrap();
         assert_eq!(lit["quoted"], json!("'O''Brien'"));
+    }
+
+    #[test]
+    fn quote_nullable_emits_bare_null_for_null() {
+        // A string value quotes exactly like quote_literal.
+        assert_eq!(
+            op_quote_nullable(json!({"value": "O'Brien"})).unwrap()["quoted"],
+            json!("'O''Brien'")
+        );
+        // JSON null and an absent value both produce the unquoted text NULL.
+        assert_eq!(
+            op_quote_nullable(json!({ "value": Value::Null })).unwrap()["quoted"],
+            json!("NULL")
+        );
+        assert_eq!(
+            op_quote_nullable(json!({})).unwrap()["quoted"],
+            json!("NULL")
+        );
+        // A non-string, non-null value is rejected.
+        assert!(op_quote_nullable(json!({"value": 42})).is_err());
     }
 
     #[test]

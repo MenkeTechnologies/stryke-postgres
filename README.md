@@ -264,6 +264,7 @@ Postgres::quote_ident($name)   → $quoted     # "weird""col"
 Postgres::quote_qualified_ident($name) → $quoted  # public.my table → "public"."my table"
 Postgres::parse_qualified_ident($name) → \@parts  # "public"."my table" → ["public","my table"]; inverse of quote_qualified_ident
 Postgres::quote_literal($val)  → $quoted     # 'O''Brien'
+Postgres::quote_nullable($val) → $quoted     # like quote_literal, but undef → NULL (unquoted)
 Postgres::unquote_literal($lit) → $val       # 'O''Brien' → O'Brien; inverse of quote_literal (standard mode)
 Postgres::format_array(\@elems) → $literal    # ["a,b","c"] → {"a,b",c} (Postgres array input syntax)
 Postgres::parse_array($literal) → \@elems     # {"a,b",NULL,c} → ["a,b",undef,"c"]; inverse of format_array (1-D)

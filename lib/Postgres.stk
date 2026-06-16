@@ -534,6 +534,12 @@ fn Postgres::quote_literal ($value) {
     Postgres::_decode("quote_literal", pg__quote_literal(to_json({ value => $value })))->{quoted}
 }
 
+## Postgres quote_nullable: like quote_literal, but undef → the unquoted text
+## NULL — safe to inline a possibly-null value directly into SQL.
+fn Postgres::quote_nullable ($value = undef) {
+    Postgres::_decode("quote_nullable", pg__quote_nullable(to_json({ value => $value })))->{quoted}
+}
+
 ## Decode a standard single-quoted SQL literal back to its raw value — inverse of
 ## quote_literal. Under standard_conforming_strings, '' un-doubles to ' and
 ## backslashes are literal. E'...' and dollar-quoting are not handled.
