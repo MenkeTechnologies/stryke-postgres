@@ -1009,6 +1009,106 @@ fn op_parse_dsn(opts: Value) -> Result<Value> {
     }))
 }
 
+/// Parse a libpq keyword/value connection string (`host=localhost port=5432
+/// dbname=mydb user=foo`) — the other documented DSN form, distinct from the URI
+/// form `parse_dsn` handles. Per the libpq rules: `keyword = value` pairs are
+/// separated by spaces, spaces around the `=` are optional, a value containing
+/// spaces or an empty value is single-quoted, and within a value `\'` and `\\`
+/// are escapes. The well-known connection keywords (`host`, `port`, `dbname`,
+/// `user`, `password`) are lifted to top-level fields and everything else is
+/// collected under `params`, matching `parse_dsn`'s output shape (`port` parsed
+/// to a number when numeric). opts: `dsn` (or `conninfo`). Returns `{user,
+/// password, host, port, dbname, params}`. Pure.
+fn op_parse_keyword_dsn(opts: Value) -> Result<Value> {
+    let dsn = opts
+        .get("dsn")
+        .or_else(|| opts.get("conninfo"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing dsn"))?;
+    let chars: Vec<char> = dsn.chars().collect();
+    let n = chars.len();
+    let mut i = 0;
+    let mut fields = serde_json::Map::new();
+    while i < n {
+        while i < n && chars[i].is_whitespace() {
+            i += 1;
+        }
+        if i >= n {
+            break;
+        }
+        let kstart = i;
+        while i < n && chars[i] != '=' && !chars[i].is_whitespace() {
+            i += 1;
+        }
+        let keyword: String = chars[kstart..i].iter().collect();
+        if keyword.is_empty() {
+            bail!("missing keyword in conninfo: {dsn}");
+        }
+        while i < n && chars[i].is_whitespace() {
+            i += 1;
+        }
+        if i >= n || chars[i] != '=' {
+            bail!("missing `=` after `{keyword}` in conninfo: {dsn}");
+        }
+        i += 1; // consume '='
+        while i < n && chars[i].is_whitespace() {
+            i += 1;
+        }
+        let mut value = String::new();
+        if i < n && chars[i] == '\'' {
+            i += 1; // opening quote
+            let mut closed = false;
+            while i < n {
+                let c = chars[i];
+                if c == '\\' && i + 1 < n {
+                    value.push(chars[i + 1]);
+                    i += 2;
+                } else if c == '\'' {
+                    i += 1;
+                    closed = true;
+                    break;
+                } else {
+                    value.push(c);
+                    i += 1;
+                }
+            }
+            if !closed {
+                bail!("unterminated quoted value for `{keyword}` in conninfo: {dsn}");
+            }
+        } else {
+            while i < n && !chars[i].is_whitespace() {
+                if chars[i] == '\\' && i + 1 < n {
+                    value.push(chars[i + 1]);
+                    i += 2;
+                } else {
+                    value.push(chars[i]);
+                    i += 1;
+                }
+            }
+        }
+        fields.insert(keyword, json!(value));
+    }
+    let take = |m: &mut serde_json::Map<String, Value>, k: &str| m.remove(k).unwrap_or(Value::Null);
+    let user = take(&mut fields, "user");
+    let password = take(&mut fields, "password");
+    let host = take(&mut fields, "host");
+    let dbname = take(&mut fields, "dbname");
+    let port = match fields.remove("port") {
+        Some(Value::String(s)) if !s.is_empty() => {
+            s.parse::<u32>().map(|n| json!(n)).unwrap_or(json!(s))
+        }
+        _ => Value::Null,
+    };
+    Ok(json!({
+        "user": user,
+        "password": password,
+        "host": host,
+        "port": port,
+        "dbname": dbname,
+        "params": Value::Object(fields),
+    }))
+}
+
 /// Build a URI DSN from explicit parts, percent-encoding userinfo/dbname and
 /// sanitizing the host with the same primitives the connector uses. Deterministic
 /// (no env lookups) — the inverse of `parse_dsn`. opts: user, password, host,
@@ -1722,6 +1822,11 @@ pub extern "C" fn pg__cancel_backend(args: *const c_char) -> *const c_char {
 #[no_mangle]
 pub extern "C" fn pg__parse_dsn(args: *const c_char) -> *const c_char {
     ffi_call(args, op_parse_dsn)
+}
+
+#[no_mangle]
+pub extern "C" fn pg__parse_keyword_dsn(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_parse_keyword_dsn)
 }
 
 #[no_mangle]
@@ -2719,6 +2824,43 @@ mod tests {
         assert!(op_parse_dsn(json!({"dsn": "host=localhost dbname=x"})).is_err());
         assert!(op_parse_dsn(json!({"dsn": "mysql://localhost/x"})).is_err());
         assert!(op_parse_dsn(json!({})).is_err());
+    }
+
+    #[test]
+    fn parse_keyword_dsn_decomposes_libpq_conninfo() {
+        // Well-known keys lift to top-level; the rest go under params; port → num.
+        let v = op_parse_keyword_dsn(json!({
+            "dsn": "host=db.example.com port=6543 dbname=analytics user=alice password=s3cret sslmode=require connect_timeout=10"
+        }))
+        .unwrap();
+        assert_eq!(v["host"], json!("db.example.com"));
+        assert_eq!(v["port"], json!(6543), "numeric port is parsed to a number");
+        assert_eq!(v["dbname"], json!("analytics"));
+        assert_eq!(v["user"], json!("alice"));
+        assert_eq!(v["password"], json!("s3cret"));
+        assert_eq!(v["params"]["sslmode"], json!("require"));
+        assert_eq!(v["params"]["connect_timeout"], json!("10"));
+        // Spaces around `=`, a single-quoted value with spaces, and backslash
+        // escapes inside a quoted value.
+        let q = op_parse_keyword_dsn(json!({
+            "dsn": "host = localhost application_name = 'my app' password='a\\'b\\\\c'"
+        }))
+        .unwrap();
+        assert_eq!(q["host"], json!("localhost"));
+        assert_eq!(q["params"]["application_name"], json!("my app"));
+        assert_eq!(
+            q["password"],
+            json!("a'b\\c"),
+            "\\' and \\\\ unescape inside quotes"
+        );
+        // An empty single-quoted value is allowed; a missing host stays null.
+        let e = op_parse_keyword_dsn(json!({"dsn": "dbname=x password=''"})).unwrap();
+        assert_eq!(e["password"], json!(""));
+        assert_eq!(e["host"], Value::Null);
+        // Errors: a keyword with no `=`, an unterminated quote, missing arg.
+        assert!(op_parse_keyword_dsn(json!({"dsn": "host"})).is_err());
+        assert!(op_parse_keyword_dsn(json!({"dsn": "host='localhost"})).is_err());
+        assert!(op_parse_keyword_dsn(json!({})).is_err());
     }
 
     #[test]

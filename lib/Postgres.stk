@@ -495,6 +495,17 @@ fn Postgres::parse_dsn ($dsn) {
     Postgres::_decode("parse_dsn", pg__parse_dsn(to_json({ dsn => $dsn })))
 }
 
+## Parse a libpq keyword/value DSN ("host=localhost port=5432 dbname=mydb
+## user=foo") — the non-URI connection-string form, distinct from parse_dsn. Per
+## libpq: space-separated keyword=value pairs (spaces around = optional), a value
+## with spaces or an empty value is single-quoted, and \' / \\ are escapes inside
+## a value. Well-known keys (host/port/dbname/user/password) are lifted to
+## top-level; the rest go under params. Returns a hashref { user, password, host,
+## port, dbname, params }.
+fn Postgres::parse_keyword_dsn ($dsn) {
+    Postgres::_decode("parse_keyword_dsn", pg__parse_keyword_dsn(to_json({ dsn => $dsn })))
+}
+
 ## Build a URI DSN from explicit parts (percent-encoded, host-sanitized).
 ## opts: user, password, host, port, dbname. Inverse of parse_dsn.
 fn Postgres::build_dsn (%opts) {
