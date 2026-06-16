@@ -295,6 +295,17 @@ assert_eq Postgres::format_in_list([1, "a", undef]), "(1, 'a', NULL)",      "for
 assert_eq Postgres::format_in_list([]),              "(NULL)",              "format_in_list: empty → (NULL)"
 assert_dies fn { Postgres::format_in_list() }, "format_in_list: dies without values"
 
+# parse_in_list: inverse of format_in_list.
+assert_eq join(",", @{ Postgres::parse_in_list("(1, 2, 3)") }), "1,2,3", "parse_in_list: bare numbers"
+val $pil = Postgres::parse_in_list(q{('a', 'O''Brien')})
+assert_eq $pil->[1], q{O'Brien}, "parse_in_list: '' un-doubles inside a quoted element"
+val $rt = Postgres::parse_in_list(Postgres::format_in_list([1, "a", undef]))
+assert_eq $rt->[0], 1,       "parse_in_list: round-trips a number"
+assert_eq $rt->[1], "a",     "parse_in_list: round-trips a string"
+assert_ok !defined($rt->[2]), "parse_in_list: round-trips NULL → undef"
+assert_eq Postgres::parse_in_list("(1.5, 'a,b')")->[1], "a,b", "parse_in_list: comma inside quotes does not split"
+assert_dies fn { Postgres::parse_in_list("1, 2, 3") }, "parse_in_list: rejects a non-parenthesized list"
+
 # parse_array: Postgres array literal → arrayref (inverse of format_array).
 val $pa = Postgres::parse_array("{\"a,b\",\"c d\",\"NULL\",ok}")
 assert_eq $pa->[0], "a,b",  "parse_array: quoted comma element"

@@ -273,6 +273,7 @@ Postgres::dollar_quote($val, $tag?) → $quoted  # $tag$val$tag$ (no escaping); 
 Postgres::unquote_dollar($quoted) → $val      # inverse of dollar_quote: $tag$val$tag$ → val (content verbatim)
 Postgres::format_array(\@elems) → $literal    # ["a,b","c"] → {"a,b",c} (Postgres array input syntax)
 Postgres::format_in_list(\@values) → $operand # [1,"a",undef] → (1, 'a', NULL) for `col IN (...)`; empty → (NULL); mixed types
+Postgres::parse_in_list($list)     → \@values  # inverse: (1, 'a', NULL, TRUE) → [1,"a",undef,1]; '' un-doubles; commas in quotes don't split
 Postgres::parse_array($literal) → \@elems     # {"a,b",NULL,c} → ["a,b",undef,"c"]; inverse of format_array (1-D)
 ```
 

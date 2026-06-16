@@ -1421,6 +1421,89 @@ fn op_format_in_list(opts: Value) -> Result<Value> {
     Ok(json!({ "list": format!("({})", parts.join(", ")) }))
 }
 
+/// Parse a SQL `IN` list `(1, 'a', NULL, TRUE)` into a list of `elements` — the
+/// inverse of `format_in_list`. Single-quoted elements are string literals
+/// (embedded `''` un-doubles to `'`); a bare `NULL`/`TRUE`/`FALSE`
+/// (case-insensitive) becomes a JSON null/bool; a bare integer or float becomes
+/// a number; anything else stays a string. Commas inside quotes don't split.
+/// `format_in_list` emits `(NULL)` for an empty input, so that parses back to a
+/// single null. opts: `list` (or `value`). Returns `{elements}`. Pure.
+fn op_parse_in_list(opts: Value) -> Result<Value> {
+    let input = opts
+        .get("list")
+        .or_else(|| opts.get("value"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing list (a SQL IN list)"))?;
+    let trimmed = input.trim();
+    let inner = trimmed
+        .strip_prefix('(')
+        .and_then(|s| s.strip_suffix(')'))
+        .ok_or_else(|| anyhow!("not an IN list (expected (...)): {input}"))?
+        .trim();
+    let mut elements: Vec<Value> = Vec::new();
+    if inner.is_empty() {
+        return Ok(json!({ "elements": elements }));
+    }
+    let mut chars = inner.chars().peekable();
+    loop {
+        while matches!(chars.peek(), Some(c) if c.is_whitespace()) {
+            chars.next();
+        }
+        let elem = if chars.peek() == Some(&'\'') {
+            chars.next(); // opening quote
+            let mut buf = String::new();
+            loop {
+                match chars.next() {
+                    Some('\'') => {
+                        if chars.peek() == Some(&'\'') {
+                            chars.next();
+                            buf.push('\'');
+                        } else {
+                            break;
+                        }
+                    }
+                    Some(c) => buf.push(c),
+                    None => return Err(anyhow!("unterminated quoted element in: {input}")),
+                }
+            }
+            json!(buf)
+        } else {
+            let mut buf = String::new();
+            while let Some(&c) = chars.peek() {
+                if c == ',' {
+                    break;
+                }
+                buf.push(c);
+                chars.next();
+            }
+            let t = buf.trim();
+            if t.eq_ignore_ascii_case("null") {
+                Value::Null
+            } else if t.eq_ignore_ascii_case("true") {
+                json!(true)
+            } else if t.eq_ignore_ascii_case("false") {
+                json!(false)
+            } else if let Ok(i) = t.parse::<i64>() {
+                json!(i)
+            } else if let Ok(f) = t.parse::<f64>() {
+                json!(f)
+            } else {
+                json!(t)
+            }
+        };
+        elements.push(elem);
+        while matches!(chars.peek(), Some(c) if c.is_whitespace()) {
+            chars.next();
+        }
+        match chars.next() {
+            Some(',') => continue,
+            None => break,
+            Some(c) => return Err(anyhow!("unexpected `{c}` after element in: {input}")),
+        }
+    }
+    Ok(json!({ "elements": elements }))
+}
+
 /// Parse a one-dimensional Postgres array literal `{a,b,"c,d"}` into a list of
 /// `elements`. Double-quoted elements are unescaped (`\"`→`"`, `\\`→`\`); an
 /// unquoted `NULL` (case-insensitive) becomes a JSON null while a quoted
@@ -1709,6 +1792,11 @@ pub extern "C" fn pg__format_array(args: *const c_char) -> *const c_char {
 #[no_mangle]
 pub extern "C" fn pg__format_in_list(args: *const c_char) -> *const c_char {
     ffi_call(args, op_format_in_list)
+}
+
+#[no_mangle]
+pub extern "C" fn pg__parse_in_list(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_parse_in_list)
 }
 
 #[no_mangle]
@@ -3004,6 +3092,42 @@ mod tests {
             json!("(42)")
         );
         assert!(op_format_in_list(json!({})).is_err());
+    }
+
+    #[test]
+    fn parse_in_list_inverts_format_in_list() {
+        let parse = |s: &str| op_parse_in_list(json!({ "list": s })).unwrap()["elements"].clone();
+        // Bare numbers, strings, bool, null.
+        assert_eq!(parse("(1, 2, 3)"), json!([1, 2, 3]));
+        assert_eq!(parse("('a', 'O''Brien')"), json!(["a", "O'Brien"]));
+        assert_eq!(parse("(1, 'a', TRUE, NULL)"), json!([1, "a", true, null]));
+        // A float and a comma inside a quoted string.
+        assert_eq!(parse("(1.5, 'a,b')"), json!([1.5, "a,b"]));
+        // Round-trips format_in_list for mixed types.
+        for vals in [
+            json!([1, 2, 3]),
+            json!(["a", "O'Brien"]),
+            json!([1, "a", true, null]),
+        ] {
+            let listed = op_format_in_list(json!({ "values": vals })).unwrap()["list"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            assert_eq!(
+                op_parse_in_list(json!({ "list": listed })).unwrap()["elements"],
+                vals
+            );
+        }
+        // The empty sentinel `(NULL)` parses to a single null; `value` alias works.
+        assert_eq!(parse("(NULL)"), json!([null]));
+        assert_eq!(
+            op_parse_in_list(json!({ "value": "(7)" })).unwrap()["elements"],
+            json!([7])
+        );
+        // Not an IN list, an unterminated quote, and a missing arg error.
+        assert!(op_parse_in_list(json!({ "list": "1, 2, 3" })).is_err());
+        assert!(op_parse_in_list(json!({ "list": "('oops)" })).is_err());
+        assert!(op_parse_in_list(json!({})).is_err());
     }
 
     #[test]

@@ -80,6 +80,7 @@ assert_ok exists &Postgres::dollar_quote, "Postgres::dollar_quote exists"
 assert_ok exists &Postgres::unquote_dollar, "Postgres::unquote_dollar exists"
 assert_ok exists &Postgres::format_array, "Postgres::format_array exists"
 assert_ok exists &Postgres::format_in_list, "Postgres::format_in_list exists"
+assert_ok exists &Postgres::parse_in_list, "Postgres::parse_in_list exists"
 assert_ok exists &Postgres::parse_array, "Postgres::parse_array exists"
 
 test_run

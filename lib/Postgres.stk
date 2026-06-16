@@ -602,6 +602,14 @@ fn Postgres::format_in_list ($values) {
     Postgres::_decode("format_in_list", pg__format_in_list(to_json({ values => $values })))->{list}
 }
 
+## Parse a SQL IN list "(1, 'a', NULL, TRUE)" into a list of values — inverse of
+## format_in_list. Single-quoted elements decode as strings ('' un-doubles);
+## bare NULL/TRUE/FALSE become undef/booleans; bare numbers become numbers.
+## Commas inside quotes don't split. Returns an arrayref of elements.
+fn Postgres::parse_in_list ($list) {
+    Postgres::_decode("parse_in_list", pg__parse_in_list(to_json({ list => $list })))->{elements}
+}
+
 ## Parse a one-dimensional Postgres array literal "{a,b,\"c,d\"}" into an
 ## arrayref of strings. Quoted elements are unescaped; an unquoted NULL becomes
 ## undef while a quoted "NULL" stays the string. Inverse of format_array.
