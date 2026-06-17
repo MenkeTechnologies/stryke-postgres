@@ -340,6 +340,21 @@ val @src = ("a,b", "c d", "ok")
 assert_eq Postgres::parse_array(Postgres::format_array(\@src))->[0], "a,b", "parse_array: round-trips format_array"
 assert_dies fn { Postgres::parse_array("a,b,c") }, "parse_array: rejects non-array-literal"
 
+# parse_range: Postgres range literal → bounds + inclusivity.
+val $r = Postgres::parse_range("[3,7)")
+assert_eq $r->{lower}, "3",            "parse_range: lower bound"
+assert_eq $r->{upper}, "7",            "parse_range: upper bound"
+assert_eq $r->{lower_inclusive}, 1,    "parse_range: [ is inclusive"
+assert_eq $r->{upper_inclusive}, 0,    "parse_range: ) is exclusive"
+assert_eq $r->{empty}, 0,              "parse_range: bounded range is not empty"
+val $lo = Postgres::parse_range("(,5]")
+assert_ok !defined($lo->{lower}),      "parse_range: omitted lower is unbounded (undef)"
+assert_eq $lo->{upper}, "5",           "parse_range: upper present"
+assert_eq Postgres::parse_range("EMPTY")->{empty}, 1, "parse_range: 'empty' (case-insensitive) is the empty range"
+val $q = Postgres::parse_range("[\"a,b\",\"z\")")
+assert_eq $q->{lower}, "a,b",          "parse_range: quoted bound keeps its comma"
+assert_dies fn { Postgres::parse_range("1,10") }, "parse_range: rejects a literal with no brackets"
+
 assert_dies fn { Postgres::parse_dsn("host=localhost dbname=x") }, "parse_dsn rejects keyword/value form"
 
 test_run

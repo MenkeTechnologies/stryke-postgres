@@ -84,5 +84,6 @@ assert_ok exists &Postgres::format_array, "Postgres::format_array exists"
 assert_ok exists &Postgres::format_in_list, "Postgres::format_in_list exists"
 assert_ok exists &Postgres::parse_in_list, "Postgres::parse_in_list exists"
 assert_ok exists &Postgres::parse_array, "Postgres::parse_array exists"
+assert_ok exists &Postgres::parse_range, "Postgres::parse_range exists"
 
 test_run

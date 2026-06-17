@@ -1728,6 +1728,107 @@ fn op_parse_array(opts: Value) -> Result<Value> {
     Ok(json!({ "elements": elements }))
 }
 
+/// Decode one bound of a range literal: an empty segment is unbounded (`null`); a
+/// `"…"`-quoted value is unquoted (`\"`→`"`, `\\`→`\`); anything else is the bare
+/// value verbatim (PostgreSQL keeps interior whitespace as part of the bound).
+fn parse_range_bound(raw: &str) -> Result<Value> {
+    if raw.is_empty() {
+        return Ok(Value::Null);
+    }
+    if let Some(rest) = raw.strip_prefix('"') {
+        let mut out = String::new();
+        let mut chars = rest.chars();
+        loop {
+            match chars.next() {
+                None => return Err(anyhow!("unterminated quoted range bound: {raw}")),
+                Some('\\') => {
+                    if let Some(n) = chars.next() {
+                        out.push(n);
+                    }
+                }
+                Some('"') => break,
+                Some(c) => out.push(c),
+            }
+        }
+        Ok(json!(out))
+    } else {
+        Ok(json!(raw))
+    }
+}
+
+/// Parse a PostgreSQL range literal into its bounds. `[`/`]` are inclusive and
+/// `(`/`)` exclusive; the lower and upper bounds are split on the top-level comma
+/// (a comma inside a `"…"` bound does not split). An omitted bound is unbounded
+/// (`null`); the literal `empty` (case-insensitive) is the empty range. Examples:
+/// `[3,7)` → 3 inclusive .. 7 exclusive; `(,5]` → unbounded .. 5 inclusive;
+/// `["a,b","z")` → quoted text bounds. opts: `range` (or `value`, required).
+/// Returns `{empty, lower, upper, lower_inclusive, upper_inclusive}`. Pure.
+fn op_parse_range(opts: Value) -> Result<Value> {
+    let raw = opts
+        .get("range")
+        .or_else(|| opts.get("value"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing range"))?;
+    let t = raw.trim();
+    if t.eq_ignore_ascii_case("empty") {
+        return Ok(json!({
+            "empty": true,
+            "lower": Value::Null,
+            "upper": Value::Null,
+            "lower_inclusive": Value::Null,
+            "upper_inclusive": Value::Null,
+        }));
+    }
+    let bytes = t.as_bytes();
+    if bytes.len() < 3 {
+        return Err(anyhow!("not a range literal: `{raw}`"));
+    }
+    let lower_inclusive = match bytes[0] {
+        b'[' => true,
+        b'(' => false,
+        _ => return Err(anyhow!("range must start with `[` or `(`: `{raw}`")),
+    };
+    let upper_inclusive = match bytes[bytes.len() - 1] {
+        b']' => true,
+        b')' => false,
+        _ => return Err(anyhow!("range must end with `]` or `)`: `{raw}`")),
+    };
+    let inner = &t[1..t.len() - 1];
+    // Find the top-level comma (one not inside a "…" bound).
+    let inner_bytes = inner.as_bytes();
+    let mut in_quote = false;
+    let mut comma: Option<usize> = None;
+    let mut i = 0;
+    while i < inner_bytes.len() {
+        let c = inner_bytes[i];
+        if in_quote {
+            if c == b'\\' {
+                i += 2;
+                continue;
+            }
+            if c == b'"' {
+                in_quote = false;
+            }
+        } else if c == b'"' {
+            in_quote = true;
+        } else if c == b',' {
+            comma = Some(i);
+            break;
+        }
+        i += 1;
+    }
+    let pos = comma.ok_or_else(|| anyhow!("range missing the lower/upper comma: `{raw}`"))?;
+    let lower = parse_range_bound(&inner[..pos])?;
+    let upper = parse_range_bound(&inner[pos + 1..])?;
+    Ok(json!({
+        "empty": false,
+        "lower": lower,
+        "upper": upper,
+        "lower_inclusive": lower_inclusive,
+        "upper_inclusive": upper_inclusive,
+    }))
+}
+
 // ── exports ─────────────────────────────────────────────────────────────────
 
 #[no_mangle]
@@ -1963,6 +2064,11 @@ pub extern "C" fn pg__parse_in_list(args: *const c_char) -> *const c_char {
 #[no_mangle]
 pub extern "C" fn pg__parse_array(args: *const c_char) -> *const c_char {
     ffi_call(args, op_parse_array)
+}
+
+#[no_mangle]
+pub extern "C" fn pg__parse_range(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_parse_range)
 }
 
 #[cfg(test)]
@@ -3400,6 +3506,47 @@ mod tests {
         // Not an array literal, and multidimensional input, both reject.
         assert!(op_parse_array(json!({"array": "a,b,c"})).is_err());
         assert!(op_parse_array(json!({"array": "{{1,2},{3,4}}"})).is_err());
+    }
+
+    #[test]
+    fn parse_range_decodes_bounds_and_inclusivity() {
+        // [3,7): 3 inclusive, 7 exclusive.
+        let v = op_parse_range(json!({"range": "[3,7)"})).unwrap();
+        assert_eq!(v["lower"], json!("3"));
+        assert_eq!(v["upper"], json!("7"));
+        assert_eq!(v["lower_inclusive"], json!(true));
+        assert_eq!(v["upper_inclusive"], json!(false));
+        assert_eq!(v["empty"], json!(false));
+        // Unbounded lower (omitted) → null; upper inclusive.
+        let lo = op_parse_range(json!({"range": "(,5]"})).unwrap();
+        assert_eq!(lo["lower"], Value::Null);
+        assert_eq!(lo["upper"], json!("5"));
+        assert_eq!(lo["lower_inclusive"], json!(false));
+        assert_eq!(lo["upper_inclusive"], json!(true));
+        // Unbounded upper.
+        assert_eq!(
+            op_parse_range(json!({"range": "[1,)"})).unwrap()["upper"],
+            Value::Null
+        );
+        // `empty` (case-insensitive) is the empty range; bounds are null.
+        let e = op_parse_range(json!({"range": "EMPTY"})).unwrap();
+        assert_eq!(e["empty"], json!(true));
+        assert_eq!(e["lower"], Value::Null);
+        // Quoted text bounds: a comma inside the quotes does not split.
+        let q = op_parse_range(json!({"range": "[\"a,b\",\"z\")"})).unwrap();
+        assert_eq!(q["lower"], json!("a,b"));
+        assert_eq!(q["upper"], json!("z"));
+        // An empty-string bound ("") is distinct from unbounded (omitted).
+        let es = op_parse_range(json!({"range": "[\"\",b]"})).unwrap();
+        assert_eq!(es["lower"], json!(""));
+        // `value` alias; structural errors.
+        assert_eq!(
+            op_parse_range(json!({"value": "[1,10]"})).unwrap()["upper_inclusive"],
+            json!(true)
+        );
+        assert!(op_parse_range(json!({"range": "1,10"})).is_err()); // no brackets
+        assert!(op_parse_range(json!({"range": "[1-10)"})).is_err()); // no comma
+        assert!(op_parse_range(json!({})).is_err());
     }
 
     #[test]

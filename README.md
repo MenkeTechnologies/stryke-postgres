@@ -277,6 +277,7 @@ Postgres::format_array(\@elems) → $literal    # ["a,b","c"] → {"a,b",c} (Pos
 Postgres::format_in_list(\@values) → $operand # [1,"a",undef] → (1, 'a', NULL) for `col IN (...)`; empty → (NULL); mixed types
 Postgres::parse_in_list($list)     → \@values  # inverse: (1, 'a', NULL, TRUE) → [1,"a",undef,1]; '' un-doubles; commas in quotes don't split
 Postgres::parse_array($literal) → \@elems     # {"a,b",NULL,c} → ["a,b",undef,"c"]; inverse of format_array (1-D)
+Postgres::parse_range($literal) → \%{ empty, lower, upper, lower_inclusive, upper_inclusive }  # [3,7) → 3 incl .. 7 excl; (,5] → unbounded .. 5 incl; "empty" range; omitted bound = undef
 ```
 
 `count` and `exists` interpolate the table name and `$where`; pass binds

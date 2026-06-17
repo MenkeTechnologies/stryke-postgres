@@ -638,3 +638,12 @@ fn Postgres::parse_in_list ($list) {
 fn Postgres::parse_array ($array) {
     Postgres::_decode("parse_array", pg__parse_array(to_json({ array => $array })))->{elements}
 }
+
+## Parse a Postgres range literal into a hashref { empty, lower, upper,
+## lower_inclusive, upper_inclusive }. [/] are inclusive bounds, (/) exclusive;
+## an omitted bound is unbounded (undef); the literal "empty" is the empty range.
+## A "…"-quoted bound is unquoted and may contain a comma. "[3,7)" → 3 inclusive
+## .. 7 exclusive; "(,5]" → unbounded .. 5 inclusive.
+fn Postgres::parse_range ($range) {
+    Postgres::_decode("parse_range", pg__parse_range(to_json({ range => $range })))
+}
