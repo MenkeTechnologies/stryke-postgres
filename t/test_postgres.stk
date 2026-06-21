@@ -191,6 +191,73 @@ if ($alive) {
 
     eval { Postgres::execute("DROP TABLE $kv", url => $dsn) }
 
+    # ── describe: prepare-only type discovery ─────────────────────────
+    val $desc = Postgres::describe("SELECT id, name FROM $tbl WHERE id = \$1", url => $dsn)
+    assert_eq ref($desc->{params}), "ARRAY",  "describe: params is an array"
+    assert_eq scalar(@{$desc->{params}}), 1,  "describe: one bind parameter"
+    assert_eq ref($desc->{columns}), "ARRAY", "describe: columns is an array"
+    assert_eq scalar(@{$desc->{columns}}), 2, "describe: two result columns"
+    assert_eq $desc->{columns}[0]{name}, "id", "describe: first column name"
+
+    # ── current: connection identity ──────────────────────────────────
+    val $cur = Postgres::current(url => $dsn)
+    assert_ok defined $cur->{database}, "current: database defined"
+    assert_ok defined $cur->{user},     "current: user defined"
+    assert_ok $cur->{pid} > 0,          "current: backend pid is positive"
+
+    # ── schemas / server_encoding / server_settings ───────────────────
+    val @schemas = Postgres::schemas(url => $dsn)
+    assert_ok scalar(grep { $_ eq "public" } @schemas), "schemas: includes public"
+    val $enc = Postgres::server_encoding(url => $dsn)
+    assert_ok defined $enc->{server_encoding}, "server_encoding: server_encoding present"
+    assert_ok defined $enc->{client_encoding}, "server_encoding: client_encoding present"
+    val @settings = Postgres::server_settings(url => $dsn)
+    assert_ok scalar(@settings) > 0, "server_settings: returns rows"
+
+    # matviews is a list (may be empty) — assert it is iterable, no error.
+    val @mv = Postgres::matviews(url => $dsn)
+    assert_ok 1, "matviews: returns without error"
+
+    # ── constraints / primary_key / foreign_keys / column_defaults ─────
+    # $tbl has `id SERIAL PRIMARY KEY` — a PK constraint and a default on id.
+    val @pk = Postgres::primary_key($tbl, url => $dsn)
+    assert_eq scalar(@pk), 1,   "primary_key: one PK column"
+    assert_eq $pk[0], "id",     "primary_key: column is id"
+    val @cons = Postgres::constraints($tbl, url => $dsn)
+    assert_ok scalar(grep { $_->{type} eq "primary key" } @cons), "constraints: has a primary key"
+    val @defs = Postgres::column_defaults($tbl, url => $dsn)
+    assert_ok scalar(grep { $_->{column} eq "id" } @defs), "column_defaults: id has a default (serial)"
+
+    # foreign_keys on a child table referencing $tbl.
+    val $child = "stryke_pg_fk_$$"
+    Postgres::execute("DROP TABLE IF EXISTS $child", url => $dsn)
+    Postgres::execute("CREATE TABLE $child (id INT PRIMARY KEY, parent_id INT REFERENCES $tbl(id))", url => $dsn)
+    val @fks = Postgres::foreign_keys($child, url => $dsn)
+    assert_eq scalar(@fks), 1,                   "foreign_keys: one FK on the child table"
+    assert_eq $fks[0]{column}, "parent_id",      "foreign_keys: referencing column"
+    assert_eq $fks[0]{references_table}, $tbl,   "foreign_keys: referenced table"
+    eval { Postgres::execute("DROP TABLE $child", url => $dsn) }
+
+    # ── table_stats ───────────────────────────────────────────────────
+    val $ts = Postgres::table_stats($tbl, url => $dsn)
+    assert_eq $ts->{table}, $tbl, "table_stats: echoes the table name"
+
+    # ── savepoints: ROLLBACK TO undoes work after the savepoint ────────
+    val $sp = "stryke_pg_sp_$$"
+    Postgres::execute("DROP TABLE IF EXISTS $sp", url => $dsn)
+    Postgres::execute("CREATE TABLE $sp (id INT)", url => $dsn)
+    Postgres::begin(url => $dsn)
+    Postgres::execute("INSERT INTO $sp VALUES (1)", url => $dsn)
+    Postgres::savepoint("a", url => $dsn)
+    Postgres::execute("INSERT INTO $sp VALUES (2)", url => $dsn)
+    assert_eq Postgres::count($sp, undef, url => $dsn), 2, "savepoint: both rows visible before rollback"
+    Postgres::rollback_to("a", url => $dsn)
+    assert_eq Postgres::count($sp, undef, url => $dsn), 1, "rollback_to: row after the savepoint undone"
+    Postgres::release_savepoint("a", url => $dsn)
+    Postgres::commit(url => $dsn)
+    assert_eq Postgres::count($sp, undef, url => $dsn), 1, "savepoint: committed row count"
+    eval { Postgres::execute("DROP TABLE $sp", url => $dsn) }
+
     eval { Postgres::execute("DROP TABLE $tbl", url => $dsn) }
 }
 
@@ -356,5 +423,19 @@ assert_eq $q->{lower}, "a,b",          "parse_range: quoted bound keeps its comm
 assert_dies fn { Postgres::parse_range("1,10") }, "parse_range: rejects a literal with no brackets"
 
 assert_dies fn { Postgres::parse_dsn("host=localhost dbname=x") }, "parse_dsn rejects keyword/value form"
+
+# split_statements: top-level `;` splitting that respects quotes / dollar-quotes
+# / comments (pure — always runs).
+val $st = Postgres::split_statements("SELECT 1; SELECT 2;")
+assert_eq scalar(@$st), 2,        "split_statements: two statements"
+assert_eq $st->[0], "SELECT 1",   "split_statements: first trimmed, no `;`"
+assert_eq $st->[1], "SELECT 2",   "split_statements: second trimmed"
+val $sq = Postgres::split_statements("INSERT INTO t VALUES ('a;b'); SELECT 1")
+assert_eq scalar(@$sq), 2,        "split_statements: `;` inside a string does not split"
+assert_eq $sq->[0], "INSERT INTO t VALUES ('a;b')", "split_statements: quoted `;` kept"
+val $dq = Postgres::split_statements("CREATE FUNCTION f() RETURNS int AS \$\$ BEGIN RETURN 1; END; \$\$ LANGUAGE plpgsql; SELECT 9")
+assert_eq scalar(@$dq), 2,        "split_statements: dollar-quoted body is one statement"
+assert_eq $dq->[1], "SELECT 9",   "split_statements: trailing statement after the function"
+assert_eq scalar(@{ Postgres::split_statements(";; ;") }), 0, "split_statements: blank statements skipped"
 
 test_run

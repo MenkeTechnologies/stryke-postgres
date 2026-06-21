@@ -59,6 +59,21 @@ exports = [
     "pg__parse_in_list",
     "pg__parse_array",
     "pg__parse_range",
+    "pg__describe",
+    "pg__current",
+    "pg__schemas",
+    "pg__matviews",
+    "pg__server_settings",
+    "pg__server_encoding",
+    "pg__constraints",
+    "pg__foreign_keys",
+    "pg__primary_key",
+    "pg__column_defaults",
+    "pg__table_stats",
+    "pg__savepoint",
+    "pg__release_savepoint",
+    "pg__rollback_to",
+    "pg__split_statements",
 ]
 
 [scripts]

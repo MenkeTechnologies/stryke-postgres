@@ -221,6 +221,22 @@ Postgres::begin       %opts → 1                    # BEGIN
 Postgres::commit      %opts → 1                    # COMMIT
 Postgres::rollback    %opts → 1                    # ROLLBACK
 Postgres::transaction $code, %opts → $code_result  # BEGIN; $code->(); COMMIT — or ROLLBACK + re-raise on die
+Postgres::savepoint         $name, %opts → 1       # SAVEPOINT <name>
+Postgres::release_savepoint $name, %opts → 1       # RELEASE SAVEPOINT <name>
+Postgres::rollback_to       $name, %opts → 1       # ROLLBACK TO SAVEPOINT <name>
+```
+
+Savepoints are nested rollback points inside an open transaction. The name
+is identifier-quoted (it can't be a bound parameter). `rollback_to` undoes
+work back to the savepoint while leaving the outer transaction open.
+
+```stryke
+Postgres::begin %c
+Postgres::execute "INSERT INTO t VALUES (1)", %c
+Postgres::savepoint "a", %c
+Postgres::execute "INSERT INTO t VALUES (2)", %c
+Postgres::rollback_to "a", %c    # row (2) undone, row (1) kept
+Postgres::commit %c
 ```
 
 ```stryke
@@ -247,13 +263,36 @@ Postgres::roles        %opts → @{ {name, superuser, can_login} }
 Postgres::explain      $sql, %opts → @plan_lines             # opt: analyze => 1, params
 Postgres::db_size      %opts → { bytes, pretty }             # current database size
 Postgres::table_size   $table, %opts → { table, bytes, pretty }
-Postgres::activity     %opts → @{ {pid, user, state, age_seconds, query} }   # pg_stat_activity
+Postgres::activity     %opts → @{ {pid, user, state, wait_event_type, age_seconds, query} }   # pg_stat_activity
 Postgres::locks        %opts → @{ {pid, locktype, mode, granted, relation} }
 Postgres::sequences    %opts → @names
 Postgres::extensions   %opts → @{ {name, version} }
 Postgres::triggers     %opts → @{ {name, table, event, timing} }
 Postgres::cancel_backend $pid, %opts → { pid, ok }           # opt: terminate => 1 (hard kill)
 ```
+
+### Schema discovery
+
+```stryke
+Postgres::describe        $sql, %opts → { params, columns }   # prepare-only; type-checks without running
+Postgres::current         %opts → { database, user, schema, pid }   # this connection's identity
+Postgres::schemas         %opts → @names                      # non-system schemas (namespaces)
+Postgres::matviews        %opts → @names                      # materialized views as schema.matview
+Postgres::server_settings %opts → @{ {name, setting, description} }   # pg_settings (SHOW ALL)
+Postgres::server_encoding %opts → { server_encoding, client_encoding, timezone }
+Postgres::constraints     $table, %opts → @{ {name, type, definition} }   # type: primary key/foreign key/unique/check/exclusion
+Postgres::foreign_keys    $table, %opts → @{ {name, column, references_table, references_column} }
+Postgres::primary_key     $table, %opts → @columns            # PK column names in key order; empty when none
+Postgres::column_defaults $table, %opts → @{ {column, default} }   # only columns with a default
+Postgres::table_stats     $table, %opts → { table, live_tuples, dead_tuples, seq_scan, idx_scan, n_tup_ins, n_tup_upd, n_tup_del }
+```
+
+`describe` prepares the statement via the extended protocol and reports the
+bind-parameter types (`$1`, `$2`, … in order) and the result-column shape
+WITHOUT executing it — the analyze-only counterpart of `explain`.
+`constraints`/`foreign_keys`/`primary_key`/`column_defaults` complement
+`schema` (which reports name/type/nullable). The `$table` arg is bound via
+`$1::regclass`, so a bare or schema-qualified name resolves safely.
 
 Pure helpers — connection-string and quoting utilities that open no socket:
 
@@ -278,6 +317,7 @@ Postgres::format_in_list(\@values) → $operand # [1,"a",undef] → (1, 'a', NUL
 Postgres::parse_in_list($list)     → \@values  # inverse: (1, 'a', NULL, TRUE) → [1,"a",undef,1]; '' un-doubles; commas in quotes don't split
 Postgres::parse_array($literal) → \@elems     # {"a,b",NULL,c} → ["a,b",undef,"c"]; inverse of format_array (1-D)
 Postgres::parse_range($literal) → \%{ empty, lower, upper, lower_inclusive, upper_inclusive }  # [3,7) → 3 incl .. 7 excl; (,5] → unbounded .. 5 incl; "empty" range; omitted bound = undef
+Postgres::split_statements($sql) → \@statements  # split a SQL script on top-level `;` (respects strings, dollar-quotes, line/block comments); blank statements dropped
 ```
 
 `count` and `exists` interpolate the table name and `$where`; pass binds
@@ -362,6 +402,7 @@ stryke-postgres/
   tests/                         # Rust contract test + repo lint gates
   examples/
     quick_query.stk
+    crud.stk
     bulk_load.stk
     discover.stk
     dump_table.stk

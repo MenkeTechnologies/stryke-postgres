@@ -888,6 +888,295 @@ fn op_insert_many(opts: Value) -> Result<Value> {
     })
 }
 
+/// Prepare `sql` (via the extended protocol) and report its parameter and
+/// result-column types WITHOUT executing it — the analyze-only counterpart to
+/// `op_explain`, useful for type-checking a query or discovering a result
+/// shape. Returns the bind-parameter type names (`$1`, `$2`, … in order) and,
+/// for each result column, its name and type. The prepared statement is
+/// discarded when the returned `Statement` drops.
+fn op_describe(opts: Value) -> Result<Value> {
+    let sql = opts["sql"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing sql"))?
+        .to_string();
+    with_client(&opts, |c| {
+        let stmt = c.prepare(&sql)?;
+        let params: Vec<String> = stmt.params().iter().map(|t| t.name().to_string()).collect();
+        let columns: Vec<Value> = stmt
+            .columns()
+            .iter()
+            .map(|col| json!({"name": col.name(), "type": col.type_().name()}))
+            .collect();
+        Ok(json!({"params": params, "columns": columns}))
+    })
+}
+
+/// `SELECT current_database(), current_user, current_schema(),
+/// pg_backend_pid()` — the identity of the connection this call rides on.
+/// Returns `{database, user, schema, pid}`.
+fn op_current(opts: Value) -> Result<Value> {
+    with_client(&opts, |c| {
+        let row = c.query_one(
+            "SELECT current_database(), current_user, current_schema(), pg_backend_pid()",
+            &[],
+        )?;
+        Ok(json!({
+            "database": row.get::<_, Option<String>>(0),
+            "user": row.get::<_, Option<String>>(1),
+            "schema": row.get::<_, Option<String>>(2),
+            "pid": row.get::<_, i32>(3),
+        }))
+    })
+}
+
+/// List non-system schemas (namespaces) by name, ordered. Excludes the
+/// `pg_*` catalog/toast schemas and `information_schema`.
+fn op_schemas(opts: Value) -> Result<Value> {
+    with_client(&opts, |c| {
+        let rows = c.query(
+            "SELECT nspname FROM pg_namespace \
+             WHERE nspname NOT LIKE 'pg_%' AND nspname <> 'information_schema' \
+             ORDER BY nspname",
+            &[],
+        )?;
+        let names: Vec<String> = rows.iter().map(|r| r.get::<_, String>(0)).collect();
+        Ok(json!({"schemas": names}))
+    })
+}
+
+/// List materialized views as `schema.matview`. The companion of `op_views`
+/// for `pg_matviews` (a materialized view is not in `pg_views`).
+fn op_matviews(opts: Value) -> Result<Value> {
+    with_client(&opts, |c| {
+        let rows = c.query(
+            "SELECT schemaname || '.' || matviewname FROM pg_matviews \
+             WHERE schemaname NOT IN ('pg_catalog','information_schema') ORDER BY 1",
+            &[],
+        )?;
+        let names: Vec<String> = rows.iter().map(|r| r.get::<_, String>(0)).collect();
+        Ok(json!({"matviews": names}))
+    })
+}
+
+/// Server configuration parameters via `SHOW ALL` ({ name, setting,
+/// description }). The runtime view of `postgresql.conf` plus session
+/// overrides.
+fn op_server_settings(opts: Value) -> Result<Value> {
+    with_client(&opts, |c| {
+        let rows = c.query(
+            "SELECT name, setting, COALESCE(short_desc, '') FROM pg_settings ORDER BY name",
+            &[],
+        )?;
+        let out: Vec<Value> = rows
+            .iter()
+            .map(|r| {
+                json!({
+                    "name": r.get::<_, String>(0),
+                    "setting": r.get::<_, Option<String>>(1),
+                    "description": r.get::<_, String>(2),
+                })
+            })
+            .collect();
+        Ok(json!({"settings": out}))
+    })
+}
+
+/// Server + client encoding and the session time zone — `{ server_encoding,
+/// client_encoding, timezone }`, read from `current_setting`.
+fn op_server_encoding(opts: Value) -> Result<Value> {
+    with_client(&opts, |c| {
+        let row = c.query_one(
+            "SELECT current_setting('server_encoding'), \
+             current_setting('client_encoding'), current_setting('TimeZone')",
+            &[],
+        )?;
+        Ok(json!({
+            "server_encoding": row.get::<_, Option<String>>(0),
+            "client_encoding": row.get::<_, Option<String>>(1),
+            "timezone": row.get::<_, Option<String>>(2),
+        }))
+    })
+}
+
+/// Constraints on `table` ({ name, type, definition }) from `pg_constraint`,
+/// where `type` is the one-letter contype expanded (`p`→primary key, `f`→
+/// foreign key, `u`→unique, `c`→check, `x`→exclusion). `table` is bound via
+/// `$1::regclass`, which resolves a bare or schema-qualified name safely.
+fn op_constraints(opts: Value) -> Result<Value> {
+    let table = opts["table"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing table"))?
+        .to_string();
+    with_client(&opts, |c| {
+        let rows = c.query(
+            "SELECT conname, \
+             CASE contype WHEN 'p' THEN 'primary key' WHEN 'f' THEN 'foreign key' \
+                          WHEN 'u' THEN 'unique' WHEN 'c' THEN 'check' \
+                          WHEN 'x' THEN 'exclusion' ELSE contype::text END, \
+             pg_get_constraintdef(oid) \
+             FROM pg_constraint WHERE conrelid = $1::regclass ORDER BY conname",
+            &[&table],
+        )?;
+        let out: Vec<Value> = rows
+            .iter()
+            .map(|r| {
+                json!({
+                    "name": r.get::<_, String>(0),
+                    "type": r.get::<_, String>(1),
+                    "definition": r.get::<_, String>(2),
+                })
+            })
+            .collect();
+        Ok(json!({"table": table, "constraints": out}))
+    })
+}
+
+/// Foreign keys declared on `table` ({ name, column, references_table,
+/// references_column }), one row per referencing column. Reads
+/// `information_schema` so each `(local col → foreign table.col)` pair is
+/// explicit, unlike `pg_get_constraintdef`'s single-string form.
+fn op_foreign_keys(opts: Value) -> Result<Value> {
+    let table = opts["table"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing table"))?
+        .to_string();
+    with_client(&opts, |c| {
+        let rows = c.query(
+            "SELECT tc.constraint_name, kcu.column_name, \
+             ccu.table_name, ccu.column_name \
+             FROM information_schema.table_constraints tc \
+             JOIN information_schema.key_column_usage kcu \
+               ON tc.constraint_name = kcu.constraint_name \
+              AND tc.table_schema = kcu.table_schema \
+             JOIN information_schema.constraint_column_usage ccu \
+               ON ccu.constraint_name = tc.constraint_name \
+              AND ccu.table_schema = tc.table_schema \
+             WHERE tc.constraint_type = 'FOREIGN KEY' AND tc.table_name = $1 \
+             ORDER BY tc.constraint_name, kcu.column_name",
+            &[&table],
+        )?;
+        let out: Vec<Value> = rows
+            .iter()
+            .map(|r| {
+                json!({
+                    "name": r.get::<_, String>(0),
+                    "column": r.get::<_, Option<String>>(1),
+                    "references_table": r.get::<_, Option<String>>(2),
+                    "references_column": r.get::<_, Option<String>>(3),
+                })
+            })
+            .collect();
+        Ok(json!({"table": table, "foreign_keys": out}))
+    })
+}
+
+/// Primary-key column names of `table`, in key order. Empty when the table
+/// has no primary key. `table` is bound via `$1::regclass`.
+fn op_primary_key(opts: Value) -> Result<Value> {
+    let table = opts["table"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing table"))?
+        .to_string();
+    with_client(&opts, |c| {
+        let rows = c.query(
+            "SELECT a.attname FROM pg_index i \
+             JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey) \
+             WHERE i.indrelid = $1::regclass AND i.indisprimary \
+             ORDER BY array_position(i.indkey, a.attnum)",
+            &[&table],
+        )?;
+        let cols: Vec<String> = rows.iter().map(|r| r.get::<_, String>(0)).collect();
+        Ok(json!({"table": table, "columns": cols}))
+    })
+}
+
+/// Per-column defaults for `table` ({ column, default }), only for columns
+/// that have one — the complement of `op_schema`, which reports name/type/
+/// nullable but not the default expression. `table` is bound.
+fn op_column_defaults(opts: Value) -> Result<Value> {
+    let table = opts["table"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing table"))?
+        .to_string();
+    with_client(&opts, |c| {
+        let rows = c.query(
+            "SELECT column_name, column_default FROM information_schema.columns \
+             WHERE table_name = $1 AND column_default IS NOT NULL \
+             ORDER BY ordinal_position",
+            &[&table],
+        )?;
+        let out: Vec<Value> = rows
+            .iter()
+            .map(|r| json!({"column": r.get::<_, String>(0), "default": r.get::<_, Option<String>>(1)}))
+            .collect();
+        Ok(json!({"table": table, "defaults": out}))
+    })
+}
+
+/// Activity statistics for `table` from `pg_stat_user_tables` ({ live_tuples,
+/// dead_tuples, seq_scan, idx_scan, n_tup_ins, n_tup_upd, n_tup_del }). Reads
+/// the collected stats, not the live heap. `table` is bound via `$1::regclass`
+/// against `relid`.
+fn op_table_stats(opts: Value) -> Result<Value> {
+    let table = opts["table"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing table"))?
+        .to_string();
+    with_client(&opts, |c| {
+        let row = c.query_opt(
+            "SELECT n_live_tup, n_dead_tup, seq_scan, idx_scan, \
+             n_tup_ins, n_tup_upd, n_tup_del \
+             FROM pg_stat_user_tables WHERE relid = $1::regclass",
+            &[&table],
+        )?;
+        match row {
+            Some(r) => Ok(json!({
+                "table": table,
+                "live_tuples": r.get::<_, Option<i64>>(0),
+                "dead_tuples": r.get::<_, Option<i64>>(1),
+                "seq_scan": r.get::<_, Option<i64>>(2),
+                "idx_scan": r.get::<_, Option<i64>>(3),
+                "n_tup_ins": r.get::<_, Option<i64>>(4),
+                "n_tup_upd": r.get::<_, Option<i64>>(5),
+                "n_tup_del": r.get::<_, Option<i64>>(6),
+            })),
+            None => Ok(json!({"table": table, "stats": Value::Null})),
+        }
+    })
+}
+
+/// Issue `SAVEPOINT <name>` on the cached connection — a nested rollback
+/// point inside an open transaction. `name` is identifier-quoted (it can't be
+/// a bound parameter in a SAVEPOINT statement). Shared body for the three
+/// savepoint ops.
+fn savepoint_stmt(opts: &Value, verb: &str) -> Result<Value> {
+    let name = opts["name"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing name"))?
+        .to_string();
+    let sql = format!("{} {}", verb, quote_ident(&name));
+    with_client(opts, |c| {
+        c.batch_execute(&sql)?;
+        Ok(json!({"ok": true, "savepoint": name}))
+    })
+}
+
+/// `SAVEPOINT <name>` — establish a savepoint in the open transaction.
+fn op_savepoint(opts: Value) -> Result<Value> {
+    savepoint_stmt(&opts, "SAVEPOINT")
+}
+
+/// `RELEASE SAVEPOINT <name>` — discard a savepoint, keeping its work.
+fn op_release_savepoint(opts: Value) -> Result<Value> {
+    savepoint_stmt(&opts, "RELEASE SAVEPOINT")
+}
+
+/// `ROLLBACK TO SAVEPOINT <name>` — undo work back to a savepoint, keeping
+/// the outer transaction open.
+fn op_rollback_to(opts: Value) -> Result<Value> {
+    savepoint_stmt(&opts, "ROLLBACK TO SAVEPOINT")
+}
+
 // ── FFI plumbing ────────────────────────────────────────────────────────────
 
 fn ffi_call<F>(args: *const c_char, handler: F) -> *const c_char
@@ -1829,6 +2118,137 @@ fn op_parse_range(opts: Value) -> Result<Value> {
     }))
 }
 
+/// Split a SQL script into its individual statements on top-level semicolons —
+/// a `;` that is NOT inside a single-quoted string, a double-quoted identifier,
+/// a dollar-quoted block (`$tag$ … $tag$`), a line comment (`-- …`), or a block
+/// comment (`/* … */`, which Postgres nests). The terminating `;` is dropped and
+/// each statement is trimmed; a trailing fragment with no `;` is kept as the last
+/// statement, and blank/whitespace-only statements are skipped. This is the pure
+/// client-side splitter behind running a multi-statement file with per-statement
+/// control (`op_exec`/`batch_execute` runs the whole script as one unit). opts:
+/// `sql` (required). Returns `{statements}`. Pure — opens no connection.
+fn op_split_statements(opts: Value) -> Result<Value> {
+    let sql = opts
+        .get("sql")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing sql"))?;
+    let chars: Vec<char> = sql.chars().collect();
+    let n = chars.len();
+    let mut out: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let mut i = 0;
+    while i < n {
+        let c = chars[i];
+        match c {
+            // Line comment — copy to end of line (kept verbatim in the statement).
+            '-' if i + 1 < n && chars[i + 1] == '-' => {
+                while i < n && chars[i] != '\n' {
+                    cur.push(chars[i]);
+                    i += 1;
+                }
+            }
+            // Block comment — Postgres allows nesting, so track depth.
+            '/' if i + 1 < n && chars[i + 1] == '*' => {
+                let mut depth = 1;
+                cur.push('/');
+                cur.push('*');
+                i += 2;
+                while i < n && depth > 0 {
+                    if chars[i] == '/' && i + 1 < n && chars[i + 1] == '*' {
+                        depth += 1;
+                        cur.push('/');
+                        cur.push('*');
+                        i += 2;
+                    } else if chars[i] == '*' && i + 1 < n && chars[i + 1] == '/' {
+                        depth -= 1;
+                        cur.push('*');
+                        cur.push('/');
+                        i += 2;
+                    } else {
+                        cur.push(chars[i]);
+                        i += 1;
+                    }
+                }
+            }
+            // Single-quoted string or double-quoted identifier — copy until the
+            // matching close quote, honoring a doubled quote (`''` / `""`) as an
+            // embedded one rather than a terminator.
+            '\'' | '"' => {
+                let quote = c;
+                cur.push(quote);
+                i += 1;
+                loop {
+                    if i >= n {
+                        break;
+                    }
+                    if chars[i] == quote {
+                        if i + 1 < n && chars[i + 1] == quote {
+                            cur.push(quote);
+                            cur.push(quote);
+                            i += 2;
+                            continue;
+                        }
+                        cur.push(quote);
+                        i += 1;
+                        break;
+                    }
+                    cur.push(chars[i]);
+                    i += 1;
+                }
+            }
+            // Dollar-quoted block — only when `$…$` opens a legal tag.
+            '$' => {
+                let mut j = i + 1;
+                while j < n && (chars[j].is_ascii_alphanumeric() || chars[j] == '_') {
+                    j += 1;
+                }
+                let tag: String = chars[i + 1..j].iter().collect();
+                let opens_tag = j < n && chars[j] == '$' && valid_dollar_tag(&tag);
+                if opens_tag {
+                    let delim: Vec<char> = format!("${}$", tag).chars().collect();
+                    // Push the opening delimiter.
+                    for &dc in &delim {
+                        cur.push(dc);
+                    }
+                    i = j + 1;
+                    // Scan for the matching closing delimiter.
+                    while i < n {
+                        if chars[i..].starts_with(delim.as_slice()) {
+                            for &dc in &delim {
+                                cur.push(dc);
+                            }
+                            i += delim.len();
+                            break;
+                        }
+                        cur.push(chars[i]);
+                        i += 1;
+                    }
+                } else {
+                    cur.push('$');
+                    i += 1;
+                }
+            }
+            ';' => {
+                let stmt = cur.trim();
+                if !stmt.is_empty() {
+                    out.push(stmt.to_string());
+                }
+                cur.clear();
+                i += 1;
+            }
+            _ => {
+                cur.push(c);
+                i += 1;
+            }
+        }
+    }
+    let tail = cur.trim();
+    if !tail.is_empty() {
+        out.push(tail.to_string());
+    }
+    Ok(json!({ "statements": out }))
+}
+
 // ── exports ─────────────────────────────────────────────────────────────────
 
 #[no_mangle]
@@ -2069,6 +2489,81 @@ pub extern "C" fn pg__parse_array(args: *const c_char) -> *const c_char {
 #[no_mangle]
 pub extern "C" fn pg__parse_range(args: *const c_char) -> *const c_char {
     ffi_call(args, op_parse_range)
+}
+
+#[no_mangle]
+pub extern "C" fn pg__describe(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_describe)
+}
+
+#[no_mangle]
+pub extern "C" fn pg__current(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_current)
+}
+
+#[no_mangle]
+pub extern "C" fn pg__schemas(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_schemas)
+}
+
+#[no_mangle]
+pub extern "C" fn pg__matviews(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_matviews)
+}
+
+#[no_mangle]
+pub extern "C" fn pg__server_settings(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_server_settings)
+}
+
+#[no_mangle]
+pub extern "C" fn pg__server_encoding(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_server_encoding)
+}
+
+#[no_mangle]
+pub extern "C" fn pg__constraints(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_constraints)
+}
+
+#[no_mangle]
+pub extern "C" fn pg__foreign_keys(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_foreign_keys)
+}
+
+#[no_mangle]
+pub extern "C" fn pg__primary_key(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_primary_key)
+}
+
+#[no_mangle]
+pub extern "C" fn pg__column_defaults(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_column_defaults)
+}
+
+#[no_mangle]
+pub extern "C" fn pg__table_stats(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_table_stats)
+}
+
+#[no_mangle]
+pub extern "C" fn pg__savepoint(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_savepoint)
+}
+
+#[no_mangle]
+pub extern "C" fn pg__release_savepoint(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_release_savepoint)
+}
+
+#[no_mangle]
+pub extern "C" fn pg__rollback_to(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_rollback_to)
+}
+
+#[no_mangle]
+pub extern "C" fn pg__split_statements(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_split_statements)
 }
 
 #[cfg(test)]
@@ -3555,5 +4050,187 @@ mod tests {
         // A stray `%` with no valid hex pair is left verbatim, never panics.
         assert_eq!(percent_decode("100%"), "100%");
         assert_eq!(percent_decode("%zz"), "%zz");
+    }
+
+    // ── new live-op arg validation (must reject before connecting) ────────────
+    //
+    // Every live op below short-circuits on a missing required arg in its pure
+    // prologue, BEFORE `with_client` opens a socket. On the server-less CI box
+    // these must return the arg Err (never hang on a connect attempt). The
+    // table/sql/name extraction is the only branch reachable without a server,
+    // so it is the only behavior unit-testable here — the actual SQL is covered
+    // by the gated `t/test_postgres.stk` live suite.
+
+    #[test]
+    fn describe_requires_sql_before_connecting() {
+        with_env(|| {
+            assert!(op_describe(json!({}))
+                .unwrap_err()
+                .to_string()
+                .contains("missing sql"));
+        });
+    }
+
+    #[test]
+    fn table_scoped_ops_require_table_before_connecting() {
+        with_env(|| {
+            for op in [
+                op_constraints as fn(Value) -> Result<Value>,
+                op_foreign_keys,
+                op_primary_key,
+                op_column_defaults,
+                op_table_stats,
+            ] {
+                let err = op(json!({})).unwrap_err().to_string();
+                assert!(err.contains("missing table"), "got: {err}");
+            }
+        });
+    }
+
+    // ── savepoint name quoting ──
+    //
+    // SAVEPOINT/RELEASE/ROLLBACK TO cannot bind the savepoint name as a
+    // parameter, so each op interpolates it — and MUST identifier-quote it to
+    // neutralize an injection like `sp; DROP TABLE x; --`. The name is rejected
+    // before connecting when absent; when present it must be wrapped in one
+    // quoted identifier. The arg-missing path is unit-testable; the quoting is
+    // asserted through `quote_ident` (the exact primitive the ops call).
+
+    #[test]
+    fn savepoint_ops_require_name_before_connecting() {
+        with_env(|| {
+            assert!(op_savepoint(json!({}))
+                .unwrap_err()
+                .to_string()
+                .contains("missing name"));
+            assert!(op_release_savepoint(json!({}))
+                .unwrap_err()
+                .to_string()
+                .contains("missing name"));
+            assert!(op_rollback_to(json!({}))
+                .unwrap_err()
+                .to_string()
+                .contains("missing name"));
+        });
+    }
+
+    #[test]
+    fn savepoint_name_injection_stays_inside_one_quoted_ident() {
+        // The savepoint ops build `<verb> <quote_ident(name)>`. Pin that an
+        // injection payload is contained in a single quoted identifier — the
+        // embedded `"` is doubled and the whole token stays quoted, so the
+        // trailing `; DROP TABLE x; --` is part of the identifier text, not a
+        // new statement.
+        let q = quote_ident("sp\"; DROP TABLE x; --");
+        assert!(q.starts_with('"') && q.ends_with('"'));
+        assert_eq!(
+            q, "\"sp\"\"; DROP TABLE x; --\"",
+            "embedded quote doubled, payload contained in one identifier"
+        );
+    }
+
+    // ── op_split_statements (pure) ───────────────────────────────────────────
+
+    #[test]
+    fn split_statements_splits_on_top_level_semicolons() {
+        let s = |sql: &str| -> Vec<String> {
+            op_split_statements(json!({ "sql": sql })).unwrap()["statements"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_str().unwrap().to_string())
+                .collect()
+        };
+        // Plain two-statement script; terminating `;` dropped, each trimmed.
+        assert_eq!(
+            s("SELECT 1; SELECT 2;"),
+            vec!["SELECT 1".to_string(), "SELECT 2".to_string()]
+        );
+        // A trailing fragment with no `;` is the last statement.
+        assert_eq!(
+            s("SELECT 1;\n  SELECT 2"),
+            vec!["SELECT 1".to_string(), "SELECT 2".to_string()]
+        );
+        // Empty / whitespace-only statements (`;;`, trailing `;`) are skipped.
+        assert_eq!(s(";;  ;"), Vec::<String>::new());
+        assert_eq!(s(""), Vec::<String>::new());
+        assert_eq!(s("   \n\t  "), Vec::<String>::new());
+    }
+
+    #[test]
+    fn split_statements_ignores_semicolons_inside_quotes_and_dollar_quotes() {
+        let s = |sql: &str| -> Vec<String> {
+            op_split_statements(json!({ "sql": sql })).unwrap()["statements"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_str().unwrap().to_string())
+                .collect()
+        };
+        // Semicolon inside a single-quoted string literal does not split.
+        assert_eq!(
+            s("INSERT INTO t VALUES ('a;b'); SELECT 1"),
+            vec![
+                "INSERT INTO t VALUES ('a;b')".to_string(),
+                "SELECT 1".to_string()
+            ]
+        );
+        // Doubled quote inside a string is an embedded quote, not a terminator.
+        assert_eq!(
+            s("SELECT 'O''Brien; Esq'; SELECT 2"),
+            vec!["SELECT 'O''Brien; Esq'".to_string(), "SELECT 2".to_string()]
+        );
+        // Semicolon inside a double-quoted identifier does not split.
+        assert_eq!(
+            s("SELECT \"weird;col\" FROM t; SELECT 2"),
+            vec![
+                "SELECT \"weird;col\" FROM t".to_string(),
+                "SELECT 2".to_string()
+            ]
+        );
+        // A function body using `;` inside a dollar-quoted block stays one stmt.
+        let body = "CREATE FUNCTION f() RETURNS int AS $$ BEGIN RETURN 1; END; $$ LANGUAGE plpgsql";
+        assert_eq!(
+            s(&format!("{}; SELECT 9", body)),
+            vec![body.to_string(), "SELECT 9".to_string()]
+        );
+        // Named dollar tag with a `;` inside, plus a non-matching `$$` within.
+        let tagged = "DO $body$ x := 'a;b'; y := 1; $body$";
+        assert_eq!(
+            s(&format!("{};SELECT 1", tagged)),
+            vec![tagged.to_string(), "SELECT 1".to_string()]
+        );
+    }
+
+    #[test]
+    fn split_statements_skips_semicolons_in_comments() {
+        let s = |sql: &str| -> Vec<String> {
+            op_split_statements(json!({ "sql": sql })).unwrap()["statements"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_str().unwrap().to_string())
+                .collect()
+        };
+        // Line comment containing a `;` does not split the statement it sits in.
+        let out = s("SELECT 1 -- a; b\n; SELECT 2");
+        assert_eq!(out.len(), 2, "line-comment `;` must not split: {out:?}");
+        assert!(out[0].contains("-- a; b"), "comment kept: {out:?}");
+        assert_eq!(out[1], "SELECT 2");
+        // Block comment (nested) containing `;` does not split.
+        let nested = s("SELECT 1 /* outer ; /* inner ; */ still */; SELECT 2");
+        assert_eq!(
+            nested.len(),
+            2,
+            "nested block-comment `;` must not split: {nested:?}"
+        );
+        assert_eq!(nested[1], "SELECT 2");
+        // A bare `$` that does NOT open a legal tag is literal, not a dollar-quote.
+        assert_eq!(
+            s("SELECT price $ 5; SELECT 2"),
+            vec!["SELECT price $ 5".to_string(), "SELECT 2".to_string()]
+        );
+        // Missing sql errors.
+        assert!(op_split_statements(json!({})).is_err());
     }
 }
