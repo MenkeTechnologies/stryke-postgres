@@ -582,6 +582,73 @@ fn Postgres::table_stats ($table, %opts) {
         pg__table_stats(to_json(Postgres::_req({ table => $table }, \%opts))))
 }
 
+# ── server admin / maintenance ────────────────────────────────────────
+
+## Server start time and uptime: { started_at, uptime_seconds }. started_at is
+## RFC 3339; uptime_seconds is the wall-clock age of the postmaster.
+fn Postgres::uptime (%opts) {
+    Postgres::_decode("uptime", pg__uptime(to_json(Postgres::_req({}, \%opts))))
+}
+
+## Streaming-replica connections from pg_stat_replication ({ pid, user,
+## application, client_addr, state, sync_state, write_lag_bytes,
+## replay_lag_bytes }). Empty when no replicas are attached. *_lag_bytes is the
+## byte distance between the primary's current WAL position and the replica's.
+fn Postgres::replication (%opts) {
+    @{ Postgres::_decode("replication",
+        pg__replication(to_json(Postgres::_req({}, \%opts))))->{replication} }
+}
+
+## Read one server configuration parameter by $name via current_setting — the
+## single-GUC complement of server_settings. opt `missing_ok => 1` returns undef
+## for an unknown parameter instead of dying. Returns the setting string.
+fn Postgres::current_setting ($name, %opts) {
+    val $r = Postgres::_req(
+        { name => $name, missing_ok => ($opts{missing_ok} ? \1 : \0) }, \%opts)
+    Postgres::_decode("current_setting", pg__current_setting(to_json($r)))->{setting}
+}
+
+## Set one server configuration parameter via set_config ($value is bound, not
+## interpolated) — the SQL form of SET. opt `local => 1` limits the change to the
+## current transaction (SET LOCAL); otherwise it lasts the session. Returns the
+## new effective setting string.
+fn Postgres::set_config ($name, $value, %opts) {
+    val $r = Postgres::_req(
+        { name => $name, value => $value, local => ($opts{local} ? \1 : \0) }, \%opts)
+    Postgres::_decode("set_config", pg__set_config(to_json($r)))->{setting}
+}
+
+## ANALYZE [VERBOSE] $table — refresh planner statistics for $table (or the whole
+## database when $table is omitted). $table is identifier-validated. opt
+## `verbose => 1`. Returns { ok, table }.
+fn Postgres::analyze ($table = undef, %opts) {
+    val $r = Postgres::_req(
+        { table => $table, verbose => ($opts{verbose} ? \1 : \0) }, \%opts)
+    Postgres::_decode("analyze", pg__analyze(to_json($r)))
+}
+
+## VACUUM [FULL] [ANALYZE] [VERBOSE] $table — reclaim dead-tuple space for $table
+## (or the whole database when omitted). VACUUM cannot run inside a transaction —
+## do not call between begin and commit. $table is identifier-validated. opts:
+## full => 1, analyze => 1, verbose => 1. Returns { ok, table }.
+fn Postgres::vacuum ($table = undef, %opts) {
+    val $r = Postgres::_req({
+        table   => $table,
+        full    => ($opts{full}    ? \1 : \0),
+        analyze => ($opts{analyze} ? \1 : \0),
+        verbose => ($opts{verbose} ? \1 : \0),
+    }, \%opts)
+    Postgres::_decode("vacuum", pg__vacuum(to_json($r)))
+}
+
+## REINDEX <target> $name — rebuild indexes. opt `target` selects the object kind:
+## index (default), table, schema, database, or system. $name is
+## identifier-validated. Returns { ok, target, name }.
+fn Postgres::reindex ($name, %opts) {
+    val $r = Postgres::_req({ name => $name, target => $opts{target} }, \%opts)
+    Postgres::_decode("reindex", pg__reindex(to_json($r)))
+}
+
 # ── pure helpers (no connection) ──────────────────────────────────────
 
 ## Split a SQL script into individual statements on top-level semicolons — a `;`

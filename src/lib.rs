@@ -1177,6 +1177,185 @@ fn op_rollback_to(opts: Value) -> Result<Value> {
     savepoint_stmt(&opts, "ROLLBACK TO SAVEPOINT")
 }
 
+/// Server start time and uptime: `{ started_at, uptime_seconds }` from
+/// `pg_postmaster_start_time()` and `now()`. `started_at` is RFC 3339; the
+/// uptime is the wall-clock age of the postmaster as a float8 of seconds.
+fn op_uptime(opts: Value) -> Result<Value> {
+    with_client(&opts, |c| {
+        let row = c.query_one(
+            "SELECT pg_postmaster_start_time(), \
+             EXTRACT(EPOCH FROM (now() - pg_postmaster_start_time()))::float8",
+            &[],
+        )?;
+        Ok(json!({
+            "started_at": row.get::<_, chrono::DateTime<chrono::Utc>>(0).to_rfc3339(),
+            "uptime_seconds": row.get::<_, f64>(1),
+        }))
+    })
+}
+
+/// Replica connections from `pg_stat_replication` ({ pid, user, application,
+/// client_addr, state, sync_state, write_lag_bytes, replay_lag_bytes }). Empty
+/// when the server has no streaming replicas attached. `*_lag_bytes` is the
+/// byte distance between the primary's current WAL position (`pg_current_wal_lsn`)
+/// and the replica's reported write/replay position.
+fn op_replication(opts: Value) -> Result<Value> {
+    with_client(&opts, |c| {
+        let rows = c.query(
+            "SELECT pid, usename, application_name, client_addr::text, state, sync_state, \
+             pg_wal_lsn_diff(pg_current_wal_lsn(), write_lsn)::float8, \
+             pg_wal_lsn_diff(pg_current_wal_lsn(), replay_lsn)::float8 \
+             FROM pg_stat_replication ORDER BY pid",
+            &[],
+        )?;
+        let out: Vec<Value> = rows
+            .iter()
+            .map(|r| {
+                json!({
+                    "pid": r.get::<_, Option<i32>>(0),
+                    "user": r.get::<_, Option<String>>(1),
+                    "application": r.get::<_, Option<String>>(2),
+                    "client_addr": r.get::<_, Option<String>>(3),
+                    "state": r.get::<_, Option<String>>(4),
+                    "sync_state": r.get::<_, Option<String>>(5),
+                    "write_lag_bytes": r.get::<_, Option<f64>>(6),
+                    "replay_lag_bytes": r.get::<_, Option<f64>>(7),
+                })
+            })
+            .collect();
+        Ok(json!({"replication": out}))
+    })
+}
+
+/// Read one server configuration parameter by `name` via `current_setting($1)`
+/// — the single-GUC complement to `server_settings`, which dumps every
+/// parameter. With `missing_ok => 1`, an unknown parameter returns `null`
+/// instead of erroring (the second arg of `current_setting`). opts: `name`
+/// (required), `missing_ok`. Returns `{ name, setting }`.
+fn op_current_setting(opts: Value) -> Result<Value> {
+    let name = opts["name"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing name"))?
+        .to_string();
+    let missing_ok = opts["missing_ok"].as_bool().unwrap_or(false);
+    with_client(&opts, |c| {
+        let row = c.query_one("SELECT current_setting($1, $2)", &[&name, &missing_ok])?;
+        Ok(json!({"name": name, "setting": row.get::<_, Option<String>>(0)}))
+    })
+}
+
+/// Set one server configuration parameter via `set_config($1, $2, $3)` — the
+/// SQL function form of `SET`. `value` is bound (no interpolation). With
+/// `local => 1` the change lasts only to the end of the current transaction
+/// (like `SET LOCAL`); otherwise it persists for the rest of the session.
+/// `set_config` returns the new effective value, which is echoed back. opts:
+/// `name` (required), `value` (required), `local`. Returns `{ name, setting }`.
+fn op_set_config(opts: Value) -> Result<Value> {
+    let name = opts["name"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing name"))?
+        .to_string();
+    let value = opts["value"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing value"))?
+        .to_string();
+    let local = opts["local"].as_bool().unwrap_or(false);
+    with_client(&opts, |c| {
+        let row = c.query_one("SELECT set_config($1, $2, $3)", &[&name, &value, &local])?;
+        Ok(json!({"name": name, "setting": row.get::<_, Option<String>>(0)}))
+    })
+}
+
+/// `ANALYZE [VERBOSE] <table>` — refresh the planner's statistics for `table`
+/// (or the whole database when `table` is omitted). `table` is identifier-
+/// validated and interpolated, since `ANALYZE` takes no bound parameters. opts:
+/// `table` (optional), `verbose`. Returns `{ ok, table }` (`table` null for a
+/// database-wide analyze).
+fn op_analyze(opts: Value) -> Result<Value> {
+    let table = match opts.get("table").and_then(Value::as_str) {
+        Some(t) => Some(validate_identifier(t, "table")?),
+        None => None,
+    };
+    let verbose = if opts["verbose"].as_bool().unwrap_or(false) {
+        "VERBOSE "
+    } else {
+        ""
+    };
+    let sql = match &table {
+        Some(t) => format!("ANALYZE {}{}", verbose, t),
+        None => format!("ANALYZE {}", verbose.trim_end()),
+    };
+    with_client(&opts, |c| {
+        c.batch_execute(sql.trim())?;
+        Ok(json!({"ok": true, "table": table}))
+    })
+}
+
+/// `VACUUM [FULL] [ANALYZE] [VERBOSE] <table>` — reclaim dead-tuple space
+/// (and, with `analyze`, refresh statistics) for `table`, or the whole database
+/// when omitted. `VACUUM` cannot run inside a transaction block, so this uses a
+/// fresh `batch_execute` on the cached connection — do not call it between
+/// `begin` and `commit`. `table` is identifier-validated and interpolated.
+/// opts: `table` (optional), `full`, `analyze`, `verbose`. Returns `{ ok, table }`.
+fn op_vacuum(opts: Value) -> Result<Value> {
+    let table = match opts.get("table").and_then(Value::as_str) {
+        Some(t) => Some(validate_identifier(t, "table")?),
+        None => None,
+    };
+    let mut flags: Vec<&str> = Vec::new();
+    if opts["full"].as_bool().unwrap_or(false) {
+        flags.push("FULL");
+    }
+    if opts["analyze"].as_bool().unwrap_or(false) {
+        flags.push("ANALYZE");
+    }
+    if opts["verbose"].as_bool().unwrap_or(false) {
+        flags.push("VERBOSE");
+    }
+    let opt_clause = if flags.is_empty() {
+        String::new()
+    } else {
+        format!("({}) ", flags.join(", "))
+    };
+    let sql = match &table {
+        Some(t) => format!("VACUUM {}{}", opt_clause, t),
+        None => format!("VACUUM {}", opt_clause),
+    };
+    with_client(&opts, |c| {
+        c.batch_execute(sql.trim())?;
+        Ok(json!({"ok": true, "table": table}))
+    })
+}
+
+/// `REINDEX <target> <name>` — rebuild indexes. `target` selects the object
+/// kind: `index` (default), `table`, `schema`, `database`, or `system`. `name`
+/// is identifier-validated and interpolated (REINDEX takes no bound parameters).
+/// opts: `name` (required), `target`. Returns `{ ok, target, name }`.
+fn op_reindex(opts: Value) -> Result<Value> {
+    let name = validate_identifier(
+        opts["name"]
+            .as_str()
+            .ok_or_else(|| anyhow!("missing name"))?,
+        "name",
+    )?;
+    let target = opts["target"].as_str().unwrap_or("index").to_lowercase();
+    let kind = match target.as_str() {
+        "index" => "INDEX",
+        "table" => "TABLE",
+        "schema" => "SCHEMA",
+        "database" => "DATABASE",
+        "system" => "SYSTEM",
+        other => {
+            bail!("invalid reindex target `{other}` (want index|table|schema|database|system)")
+        }
+    };
+    let sql = format!("REINDEX {} {}", kind, name);
+    with_client(&opts, |c| {
+        c.batch_execute(&sql)?;
+        Ok(json!({"ok": true, "target": target, "name": name}))
+    })
+}
+
 // ── FFI plumbing ────────────────────────────────────────────────────────────
 
 fn ffi_call<F>(args: *const c_char, handler: F) -> *const c_char
@@ -2559,6 +2738,41 @@ pub extern "C" fn pg__release_savepoint(args: *const c_char) -> *const c_char {
 #[no_mangle]
 pub extern "C" fn pg__rollback_to(args: *const c_char) -> *const c_char {
     ffi_call(args, op_rollback_to)
+}
+
+#[no_mangle]
+pub extern "C" fn pg__uptime(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_uptime)
+}
+
+#[no_mangle]
+pub extern "C" fn pg__replication(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_replication)
+}
+
+#[no_mangle]
+pub extern "C" fn pg__current_setting(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_current_setting)
+}
+
+#[no_mangle]
+pub extern "C" fn pg__set_config(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_set_config)
+}
+
+#[no_mangle]
+pub extern "C" fn pg__analyze(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_analyze)
+}
+
+#[no_mangle]
+pub extern "C" fn pg__vacuum(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_vacuum)
+}
+
+#[no_mangle]
+pub extern "C" fn pg__reindex(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_reindex)
 }
 
 #[no_mangle]
@@ -4232,5 +4446,52 @@ mod tests {
         );
         // Missing sql errors.
         assert!(op_split_statements(json!({})).is_err());
+    }
+
+    // ── maintenance-op input validation (pre-connection) ─────────────────────
+    //
+    // ANALYZE / VACUUM / REINDEX interpolate the table/index name into SQL (these
+    // statements take no bound parameters), so they MUST reject anything that
+    // isn't a bare identifier before they ever build the string. The validation
+    // runs ahead of `with_client`, so these errors surface with no live server —
+    // pinning that an injection attempt can't slip a crafted name through.
+
+    #[test]
+    fn reindex_rejects_invalid_target() {
+        // An unknown target kind is rejected before any connection is opened.
+        let err = op_reindex(json!({"name": "my_idx", "target": "tablespace"}))
+            .expect_err("unknown reindex target must error");
+        assert!(
+            err.to_string().contains("invalid reindex target"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn reindex_rejects_injection_name() {
+        // A name carrying SQL must fail identifier validation, not interpolate.
+        let err = op_reindex(json!({"name": "idx; DROP TABLE users", "target": "index"}))
+            .expect_err("a name with `;` must fail identifier validation");
+        assert!(err.to_string().contains("invalid character"), "got: {err}");
+        // Missing name errors too.
+        assert!(op_reindex(json!({"target": "index"})).is_err());
+    }
+
+    #[test]
+    fn analyze_and_vacuum_reject_injection_table() {
+        // The interpolated table name is identifier-checked for both.
+        for op in [op_analyze, op_vacuum] {
+            let err = op(json!({"table": "t; DROP TABLE x"}))
+                .expect_err("a table name with `;` must fail validation");
+            assert!(err.to_string().contains("invalid character"), "got: {err}");
+        }
+    }
+
+    #[test]
+    fn current_setting_and_set_config_require_their_args() {
+        // current_setting needs a name; set_config needs both name and value.
+        assert!(op_current_setting(json!({})).is_err());
+        assert!(op_set_config(json!({"name": "work_mem"})).is_err());
+        assert!(op_set_config(json!({"value": "64MB"})).is_err());
     }
 }

@@ -294,6 +294,25 @@ WITHOUT executing it — the analyze-only counterpart of `explain`.
 `schema` (which reports name/type/nullable). The `$table` arg is bound via
 `$1::regclass`, so a bare or schema-qualified name resolves safely.
 
+### Server admin / maintenance
+
+```stryke
+Postgres::uptime          %opts → { started_at, uptime_seconds }   # pg_postmaster_start_time()
+Postgres::replication     %opts → @{ {pid, user, application, client_addr, state, sync_state, write_lag_bytes, replay_lag_bytes} }   # pg_stat_replication
+Postgres::current_setting $name, %opts → $setting | undef   # one GUC via current_setting; opt: missing_ok => 1
+Postgres::set_config      $name, $value, %opts → $setting   # set one GUC ($value bound); opt: local => 1 (SET LOCAL)
+Postgres::analyze         $table?, %opts → { ok, table }    # ANALYZE [VERBOSE]; whole DB when $table omitted
+Postgres::vacuum          $table?, %opts → { ok, table }    # VACUUM [FULL] [ANALYZE] [VERBOSE]; not inside a transaction
+Postgres::reindex         $name, %opts → { ok, target, name }   # REINDEX; opt target => index|table|schema|database|system (default index)
+```
+
+`current_setting` reads a single configuration parameter — the per-GUC
+complement of `server_settings`, which dumps them all; `set_config` writes one
+with the value bound (no interpolation). `analyze`/`vacuum`/`reindex` interpolate
+the identifier-validated table/index name (these statements take no bound
+parameters). `vacuum` cannot run inside a transaction block — do not call it
+between `begin` and `commit`.
+
 Pure helpers — connection-string and quoting utilities that open no socket:
 
 ```stryke

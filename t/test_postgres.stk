@@ -242,6 +242,40 @@ if ($alive) {
     val $ts = Postgres::table_stats($tbl, url => $dsn)
     assert_eq $ts->{table}, $tbl, "table_stats: echoes the table name"
 
+    # ── server admin / maintenance ─────────────────────────────────────
+    val $up = Postgres::uptime(url => $dsn)
+    assert_ok defined $up->{started_at}, "uptime: started_at present"
+    assert_ok $up->{uptime_seconds} >= 0, "uptime: uptime_seconds is non-negative"
+
+    # replication: empty (an arrayref) on a standalone primary; never dies.
+    val @repl = Postgres::replication(url => $dsn)
+    assert_ok scalar(@repl) >= 0, "replication: returns a list (possibly empty)"
+
+    # current_setting reads one GUC; set_config writes one (session scope).
+    val $am = Postgres::current_setting("application_name", url => $dsn)
+    assert_ok defined $am, "current_setting: application_name defined"
+    val $set = Postgres::set_config("application_name", "stryke_pg_test", url => $dsn)
+    assert_eq $set, "stryke_pg_test", "set_config: echoes the new value"
+    assert_eq Postgres::current_setting("application_name", url => $dsn), "stryke_pg_test",
+        "set_config persists for the session, read back by current_setting"
+    # missing_ok: an unknown parameter returns undef instead of dying.
+    assert_ok !defined(Postgres::current_setting("no.such.guc", missing_ok => 1, url => $dsn)),
+        "current_setting: missing_ok yields undef for an unknown parameter"
+
+    # ANALYZE + VACUUM refresh stats / reclaim space; both succeed on $tbl.
+    assert_eq Postgres::analyze($tbl, url => $dsn)->{ok}, 1, "analyze: ok on the test table"
+    assert_eq Postgres::vacuum($tbl, analyze => 1, url => $dsn)->{ok}, 1, "vacuum: ok with analyze"
+
+    # REINDEX the table's primary-key index (it has a SERIAL PK).
+    val @pk_idx = Postgres::indexes(table => $tbl, url => $dsn)
+    if (@pk_idx) {
+        val $idx_name = $pk_idx[0]->{name}
+        assert_eq Postgres::reindex($idx_name, target => "index", url => $dsn)->{ok}, 1,
+            "reindex: ok on the table's index"
+    }
+    assert_eq Postgres::reindex($tbl, target => "table", url => $dsn)->{ok}, 1,
+        "reindex: ok on the whole table"
+
     # ── savepoints: ROLLBACK TO undoes work after the savepoint ────────
     val $sp = "stryke_pg_sp_$$"
     Postgres::execute("DROP TABLE IF EXISTS $sp", url => $dsn)

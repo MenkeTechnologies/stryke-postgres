@@ -80,6 +80,15 @@ assert_ok exists &Postgres::primary_key, "Postgres::primary_key exists"
 assert_ok exists &Postgres::column_defaults, "Postgres::column_defaults exists"
 assert_ok exists &Postgres::table_stats, "Postgres::table_stats exists"
 
+# ── Postgres.stk server admin / maintenance ──
+assert_ok exists &Postgres::uptime, "Postgres::uptime exists"
+assert_ok exists &Postgres::replication, "Postgres::replication exists"
+assert_ok exists &Postgres::current_setting, "Postgres::current_setting exists"
+assert_ok exists &Postgres::set_config, "Postgres::set_config exists"
+assert_ok exists &Postgres::analyze, "Postgres::analyze exists"
+assert_ok exists &Postgres::vacuum, "Postgres::vacuum exists"
+assert_ok exists &Postgres::reindex, "Postgres::reindex exists"
+
 # ── pure DSN/quoting helpers ──
 assert_ok exists &Postgres::split_statements, "Postgres::split_statements exists"
 assert_ok exists &Postgres::parse_dsn, "Postgres::parse_dsn exists"
