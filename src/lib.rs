@@ -159,6 +159,18 @@ fn validate_identifier(name: &str, what: &str) -> Result<String> {
     Ok(name.to_string())
 }
 
+/// Read a boolean option that arrives over the FFI JSON boundary. The `.stk`
+/// wrappers send booleans as integer `1`/`0` (a scalar ref `\1` serializes to a
+/// useless `"SCALAR(0x...)"` string, so it must not be used). Accept JSON bools
+/// and JSON numbers (non-zero = true); anything else yields `None`.
+fn opt_truthy(opts: &Value, key: &str) -> Option<bool> {
+    match opts.get(key) {
+        Some(Value::Bool(b)) => Some(*b),
+        Some(Value::Number(n)) => Some(n.as_f64().is_some_and(|x| x != 0.0)),
+        _ => None,
+    }
+}
+
 fn with_client<F, R>(opts: &Value, f: F) -> Result<R>
 where
     F: FnOnce(&mut Client) -> Result<R>,
@@ -551,7 +563,7 @@ fn quote_ident(name: &str) -> String {
 
 fn op_explain(opts: Value) -> Result<Value> {
     let sql = opts["sql"].as_str().ok_or_else(|| anyhow!("missing sql"))?;
-    let analyze = opts["analyze"].as_bool().unwrap_or(false);
+    let analyze = opt_truthy(&opts, "analyze").unwrap_or(false);
     let params = params_from_value(&opts["params"]);
     // ANALYZE actually runs the statement — only enable when the caller asks.
     let prefix = if analyze {
@@ -767,7 +779,7 @@ fn op_triggers(opts: Value) -> Result<Value> {
 fn op_cancel_backend(opts: Value) -> Result<Value> {
     let pid = opts["pid"].as_i64().ok_or_else(|| anyhow!("missing pid"))? as i32;
     // `terminate => 1` issues pg_terminate_backend (hard kill) instead of cancel.
-    let terminate = opts["terminate"].as_bool().unwrap_or(false);
+    let terminate = opt_truthy(&opts, "terminate").unwrap_or(false);
     with_client(&opts, |c| {
         let sql = if terminate {
             "SELECT pg_terminate_backend($1)"
@@ -1237,7 +1249,7 @@ fn op_current_setting(opts: Value) -> Result<Value> {
         .as_str()
         .ok_or_else(|| anyhow!("missing name"))?
         .to_string();
-    let missing_ok = opts["missing_ok"].as_bool().unwrap_or(false);
+    let missing_ok = opt_truthy(&opts, "missing_ok").unwrap_or(false);
     with_client(&opts, |c| {
         let row = c.query_one("SELECT current_setting($1, $2)", &[&name, &missing_ok])?;
         Ok(json!({"name": name, "setting": row.get::<_, Option<String>>(0)}))
@@ -1259,7 +1271,7 @@ fn op_set_config(opts: Value) -> Result<Value> {
         .as_str()
         .ok_or_else(|| anyhow!("missing value"))?
         .to_string();
-    let local = opts["local"].as_bool().unwrap_or(false);
+    let local = opt_truthy(&opts, "local").unwrap_or(false);
     with_client(&opts, |c| {
         let row = c.query_one("SELECT set_config($1, $2, $3)", &[&name, &value, &local])?;
         Ok(json!({"name": name, "setting": row.get::<_, Option<String>>(0)}))
@@ -1276,7 +1288,7 @@ fn op_analyze(opts: Value) -> Result<Value> {
         Some(t) => Some(validate_identifier(t, "table")?),
         None => None,
     };
-    let verbose = if opts["verbose"].as_bool().unwrap_or(false) {
+    let verbose = if opt_truthy(&opts, "verbose").unwrap_or(false) {
         "VERBOSE "
     } else {
         ""
@@ -1303,13 +1315,13 @@ fn op_vacuum(opts: Value) -> Result<Value> {
         None => None,
     };
     let mut flags: Vec<&str> = Vec::new();
-    if opts["full"].as_bool().unwrap_or(false) {
+    if opt_truthy(&opts, "full").unwrap_or(false) {
         flags.push("FULL");
     }
-    if opts["analyze"].as_bool().unwrap_or(false) {
+    if opt_truthy(&opts, "analyze").unwrap_or(false) {
         flags.push("ANALYZE");
     }
-    if opts["verbose"].as_bool().unwrap_or(false) {
+    if opt_truthy(&opts, "verbose").unwrap_or(false) {
         flags.push("VERBOSE");
     }
     let opt_clause = if flags.is_empty() {

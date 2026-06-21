@@ -438,7 +438,7 @@ fn Postgres::truncate ($table, %opts) {
 ## EXPLAIN $sql; opt `analyze => 1` actually runs it. Returns plan-text lines.
 fn Postgres::explain ($sql, %opts) {
     val $r = Postgres::_req(
-        { sql => $sql, params => $opts{params}, analyze => ($opts{analyze} ? \1 : \0) }, \%opts)
+        { sql => $sql, params => $opts{params}, analyze => ($opts{analyze} ? 1 : 0) }, \%opts)
     @{ Postgres::_decode("explain", pg__explain(to_json($r)))->{plan} }
 }
 
@@ -505,7 +505,7 @@ fn Postgres::triggers (%opts) {
 ## Cancel the running query on backend $pid (opt `terminate => 1` kills the
 ## whole session). Returns { pid, ok }.
 fn Postgres::cancel_backend ($pid, %opts) {
-    val $r = Postgres::_req({ pid => $pid, terminate => ($opts{terminate} ? \1 : \0) }, \%opts)
+    val $r = Postgres::_req({ pid => $pid, terminate => ($opts{terminate} ? 1 : 0) }, \%opts)
     Postgres::_decode("cancel_backend", pg__cancel_backend(to_json($r)))
 }
 
@@ -604,7 +604,7 @@ fn Postgres::replication (%opts) {
 ## for an unknown parameter instead of dying. Returns the setting string.
 fn Postgres::current_setting ($name, %opts) {
     val $r = Postgres::_req(
-        { name => $name, missing_ok => ($opts{missing_ok} ? \1 : \0) }, \%opts)
+        { name => $name, missing_ok => ($opts{missing_ok} ? 1 : 0) }, \%opts)
     Postgres::_decode("current_setting", pg__current_setting(to_json($r)))->{setting}
 }
 
@@ -614,7 +614,7 @@ fn Postgres::current_setting ($name, %opts) {
 ## new effective setting string.
 fn Postgres::set_config ($name, $value, %opts) {
     val $r = Postgres::_req(
-        { name => $name, value => $value, local => ($opts{local} ? \1 : \0) }, \%opts)
+        { name => $name, value => $value, local => ($opts{local} ? 1 : 0) }, \%opts)
     Postgres::_decode("set_config", pg__set_config(to_json($r)))->{setting}
 }
 
@@ -623,7 +623,7 @@ fn Postgres::set_config ($name, $value, %opts) {
 ## `verbose => 1`. Returns { ok, table }.
 fn Postgres::analyze ($table = undef, %opts) {
     val $r = Postgres::_req(
-        { table => $table, verbose => ($opts{verbose} ? \1 : \0) }, \%opts)
+        { table => $table, verbose => ($opts{verbose} ? 1 : 0) }, \%opts)
     Postgres::_decode("analyze", pg__analyze(to_json($r)))
 }
 
@@ -634,9 +634,9 @@ fn Postgres::analyze ($table = undef, %opts) {
 fn Postgres::vacuum ($table = undef, %opts) {
     val $r = Postgres::_req({
         table   => $table,
-        full    => ($opts{full}    ? \1 : \0),
-        analyze => ($opts{analyze} ? \1 : \0),
-        verbose => ($opts{verbose} ? \1 : \0),
+        full    => ($opts{full}    ? 1 : 0),
+        analyze => ($opts{analyze} ? 1 : 0),
+        verbose => ($opts{verbose} ? 1 : 0),
     }, \%opts)
     Postgres::_decode("vacuum", pg__vacuum(to_json($r)))
 }
