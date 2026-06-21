@@ -135,8 +135,57 @@
 {"error": "&lt;msg&gt;"}        # failure — wrapper die()s with the message</pre>
 
       <hr class="section-rule">
-      <h2 class="tutorial-title"><span class="step-hash">/</span>SCOPE</h2>
-      <p>See the README's <a href="https://github.com/MenkeTechnologies/stryke-postgres#readme">"Why this is a package"</a> + "API reference" sections for the authoritative scope. The package is intentionally narrower than its underlying SDK / driver &mdash; the goal is "useful from a shell pipeline", not "complete API coverage".</p>
+      <h2 class="tutorial-title"><span class="step-hash">@</span>CONNECTION RESOLUTION</h2>
+      <p>Every connecting wrapper threads its <code>%opts</code> through one builder (<code>Postgres::_req</code> in <code>lib/Postgres.stk</code>), which collects the connection keys and falls back to the environment. Resolution order:</p>
+      <table class="arch-table">
+        <thead><tr><th>Priority</th><th>Source</th></tr></thead>
+        <tbody>
+          <tr><td>1</td><td><code>url =&gt; "postgres://user:pass@host:port/db"</code> named arg</td></tr>
+          <tr><td>2</td><td>individual named args: <code>host</code>, <code>port</code>, <code>user</code>, <code>password</code>, <code>database</code></td></tr>
+          <tr><td>3</td><td><code>$ENV{DATABASE_URL}</code> (or <code>$ENV{POSTGRES_URL}</code>) when neither <code>url</code> nor <code>host</code> is given</td></tr>
+        </tbody>
+      </table>
+      <p>Statements sharing the same resolved connection key reuse the same cached <code>postgres::Client</code> (connection affinity), which is what lets <code>begin</code>/<code>commit</code>, savepoints, and <code>LISTEN</code>/<code>NOTIFY</code> stay on one backend with no extra socket setup.</p>
+
+      <hr class="section-rule">
+      <h2 class="tutorial-title"><span class="step-hash">/</span>PUBLIC SURFACE</h2>
+      <p>The package is intentionally narrower than the underlying <code>postgres</code> driver &mdash; the goal is "useful from a shell pipeline", not "complete API coverage". The surface groups into the categories below; the authoritative per-function reference is the <a href="https://github.com/MenkeTechnologies/stryke-postgres#0x04-api-reference">README "API reference"</a> and the rendered <a href="index.html">Docs</a> page.</p>
+      <table class="arch-table">
+        <thead><tr><th>Category</th><th>Functions</th></tr></thead>
+        <tbody>
+          <tr><td>Read paths</td><td><code>query</code>, <code>query_stream</code>, <code>query_one</code>, <code>query_col</code>, <code>query_scalar</code>, <code>dump</code></td></tr>
+          <tr><td>Write paths</td><td><code>execute</code>, <code>exec_file</code>, <code>insert_many</code>, <code>upsert</code>, <code>update</code>, <code>delete</code>, <code>truncate</code></td></tr>
+          <tr><td>Bulk transfer (COPY)</td><td><code>copy_in</code>, <code>copy_out</code></td></tr>
+          <tr><td>LISTEN / NOTIFY</td><td><code>notify</code>, <code>listen</code></td></tr>
+          <tr><td>Transactions</td><td><code>begin</code>, <code>commit</code>, <code>rollback</code>, <code>transaction</code>, <code>savepoint</code>, <code>release_savepoint</code>, <code>rollback_to</code></td></tr>
+          <tr><td>Metadata</td><td><code>ping</code>, <code>tables</code>, <code>databases</code>, <code>schema</code>, <code>count</code>, <code>exists</code>, <code>table_exists</code>, <code>views</code>, <code>functions</code>, <code>indexes</code>, <code>roles</code>, <code>explain</code>, <code>db_size</code>, <code>table_size</code>, <code>activity</code>, <code>locks</code>, <code>sequences</code>, <code>extensions</code>, <code>triggers</code>, <code>cancel_backend</code></td></tr>
+          <tr><td>Schema discovery</td><td><code>describe</code>, <code>current</code>, <code>schemas</code>, <code>matviews</code>, <code>server_settings</code>, <code>server_encoding</code>, <code>constraints</code>, <code>foreign_keys</code>, <code>primary_key</code>, <code>column_defaults</code>, <code>table_stats</code></td></tr>
+          <tr><td>Server admin / maintenance</td><td><code>uptime</code>, <code>replication</code>, <code>current_setting</code>, <code>set_config</code>, <code>analyze</code>, <code>vacuum</code>, <code>reindex</code></td></tr>
+          <tr><td>Pure helpers (no socket)</td><td><code>parse_dsn</code>, <code>parse_keyword_dsn</code>, <code>build_dsn</code>, <code>build_keyword_dsn</code>, <code>quote_ident</code>, <code>unquote_ident</code>, <code>quote_qualified_ident</code>, <code>parse_qualified_ident</code>, <code>quote_literal</code>, <code>unquote_literal</code>, <code>quote_nullable</code>, <code>escape_like</code>, <code>unescape_like</code>, <code>dollar_quote</code>, <code>unquote_dollar</code>, <code>format_array</code>, <code>parse_array</code>, <code>format_in_list</code>, <code>parse_in_list</code>, <code>parse_range</code>, <code>split_statements</code></td></tr>
+          <tr><td>Versions</td><td><code>version</code>, <code>server_version</code></td></tr>
+        </tbody>
+      </table>
+      <p>Injection-safety invariants hold across the surface: table, column, conflict, returning, savepoint, and maintenance-target names are identifier-validated/quoted; values are bound as positional parameters. Where a clause is interpolated rather than bound (<code>update</code>/<code>delete</code> <code>$where</code>, <code>analyze</code>/<code>vacuum</code>/<code>reindex</code> targets), the README documents it explicitly so the caller passes trusted input.</p>
+
+      <hr class="section-rule">
+      <h2 class="tutorial-title"><span class="step-hash">%</span>TYPE ENCODING</h2>
+      <p>Result columns are encoded Postgres &rarr; JSON before crossing the FFI boundary:</p>
+      <table class="arch-table">
+        <thead><tr><th>Postgres type</th><th>JSON</th></tr></thead>
+        <tbody>
+          <tr><td><code>bool</code></td><td>bool</td></tr>
+          <tr><td><code>int2</code>, <code>int4</code>, <code>int8</code></td><td>number</td></tr>
+          <tr><td><code>float4</code>, <code>float8</code></td><td>number</td></tr>
+          <tr><td><code>text</code>, <code>varchar</code>, <code>bpchar</code>, <code>name</code></td><td>string</td></tr>
+          <tr><td><code>date</code></td><td><code>"YYYY-MM-DD"</code></td></tr>
+          <tr><td><code>timestamp</code></td><td><code>"YYYY-MM-DD HH:MM:SS[.ffffff]"</code></td></tr>
+          <tr><td><code>timestamptz</code></td><td>RFC 3339</td></tr>
+          <tr><td><code>uuid</code></td><td>string</td></tr>
+          <tr><td><code>json</code>, <code>jsonb</code></td><td>preserved as JSON</td></tr>
+          <tr><td>other</td><td>string (text fallback; null when no text conversion exists)</td></tr>
+          <tr><td><code>NULL</code></td><td>null</td></tr>
+        </tbody>
+      </table>
 
       <hr class="section-rule">
       <h2 class="tutorial-title"><span class="step-hash">#</span>PROJECT METADATA</h2>
