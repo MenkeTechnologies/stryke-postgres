@@ -74,6 +74,13 @@ exports = [
     "pg__release_savepoint",
     "pg__rollback_to",
     "pg__split_statements",
+    "pg__analyze",
+    "pg__current_setting",
+    "pg__reindex",
+    "pg__replication",
+    "pg__set_config",
+    "pg__uptime",
+    "pg__vacuum",
 ]
 
 [scripts]
