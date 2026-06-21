@@ -96,7 +96,7 @@ val @rows = Postgres::query "SELECT id, name FROM users WHERE created_at > \$1",
 
 # Streaming variant — no full-result buffering.
 Postgres::query_stream "SELECT * FROM big_table",
-    callback => fn ($row) { process $row }
+    callback => fn { process _ }
 
 # Write paths return { affected }.
 val $r = Postgres::execute "UPDATE users SET name = \$1 WHERE id = \$2",
