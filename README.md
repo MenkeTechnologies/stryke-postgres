@@ -90,16 +90,16 @@ $ENV{DATABASE_URL} = "postgres://wizard@127.0.0.1:5432/app"
 p Postgres::query_scalar "SELECT COUNT(*) FROM users"
 
 # Rows with positional placeholders ($1, $2, …).
-my @rows = Postgres::query "SELECT id, name FROM users WHERE created_at > \$1",
+val @rows = Postgres::query "SELECT id, name FROM users WHERE created_at > \$1",
                            bind => ["2025-01-01"]
 @rows |> ep
 
 # Streaming variant — no full-result buffering.
 Postgres::query_stream "SELECT * FROM big_table",
-    callback => sub ($row) { process $row }
+    callback => fn ($row) { process $row }
 
 # Write paths return { affected }.
-my $r = Postgres::execute "UPDATE users SET name = \$1 WHERE id = \$2",
+val $r = Postgres::execute "UPDATE users SET name = \$1 WHERE id = \$2",
                           bind => ["alice", 42]
 p "updated $r->{affected}"
 
@@ -112,7 +112,7 @@ Postgres::insert_many "users",
 # With RETURNING — get the generated rows back instead of a count. The
 # returning clause is a comma-separated identifier list (or "*"); each
 # token is validated, so it's injection-safe.
-my @rows = Postgres::insert_many "users",
+val @rows = Postgres::insert_many "users",
     [{ name => "z", score => 3 }],
     returning => "id"
 p $rows[0]->{id}
@@ -207,7 +207,7 @@ Postgres::upsert "kv", { id => 1, name => "a", hits => 1 }, conflict => ["id"]
 Postgres::upsert "kv", { id => 1, name => "x", hits => 9 },
                  conflict => ["id"], update => ["hits"]
 # get the row back
-my @r = Postgres::upsert "kv", { id => 2, name => "b" },
+val @r = Postgres::upsert "kv", { id => 2, name => "b" },
                          conflict => ["id"], returning => "*"
 ```
 
