@@ -702,10 +702,10 @@ fn op_table_size(opts: Value) -> Result<Value> {
         .as_str()
         .ok_or_else(|| anyhow!("missing table"))?;
     with_client(&opts, |c| {
-        // $1::regclass resolves schema-qualified or bare names safely.
+        // $1::text::regclass resolves schema-qualified or bare names safely.
         let row = c.query_one(
-            "SELECT pg_total_relation_size($1::regclass), \
-             pg_size_pretty(pg_total_relation_size($1::regclass))",
+            "SELECT pg_total_relation_size($1::text::regclass), \
+             pg_size_pretty(pg_total_relation_size($1::text::regclass))",
             &[&table],
         )?;
         Ok(
@@ -1001,7 +1001,7 @@ fn op_server_encoding(opts: Value) -> Result<Value> {
 /// Constraints on `table` ({ name, type, definition }) from `pg_constraint`,
 /// where `type` is the one-letter contype expanded (`p`→primary key, `f`→
 /// foreign key, `u`→unique, `c`→check, `x`→exclusion). `table` is bound via
-/// `$1::regclass`, which resolves a bare or schema-qualified name safely.
+/// `$1::text::regclass`, which resolves a bare or schema-qualified name safely.
 fn op_constraints(opts: Value) -> Result<Value> {
     let table = opts["table"]
         .as_str()
@@ -1014,7 +1014,7 @@ fn op_constraints(opts: Value) -> Result<Value> {
                           WHEN 'u' THEN 'unique' WHEN 'c' THEN 'check' \
                           WHEN 'x' THEN 'exclusion' ELSE contype::text END, \
              pg_get_constraintdef(oid) \
-             FROM pg_constraint WHERE conrelid = $1::regclass ORDER BY conname",
+             FROM pg_constraint WHERE conrelid = $1::text::regclass ORDER BY conname",
             &[&table],
         )?;
         let out: Vec<Value> = rows
@@ -1071,7 +1071,7 @@ fn op_foreign_keys(opts: Value) -> Result<Value> {
 }
 
 /// Primary-key column names of `table`, in key order. Empty when the table
-/// has no primary key. `table` is bound via `$1::regclass`.
+/// has no primary key. `table` is bound via `$1::text::regclass`.
 fn op_primary_key(opts: Value) -> Result<Value> {
     let table = opts["table"]
         .as_str()
@@ -1081,7 +1081,7 @@ fn op_primary_key(opts: Value) -> Result<Value> {
         let rows = c.query(
             "SELECT a.attname FROM pg_index i \
              JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey) \
-             WHERE i.indrelid = $1::regclass AND i.indisprimary \
+             WHERE i.indrelid = $1::text::regclass AND i.indisprimary \
              ORDER BY array_position(i.indkey, a.attnum)",
             &[&table],
         )?;
@@ -1115,7 +1115,7 @@ fn op_column_defaults(opts: Value) -> Result<Value> {
 
 /// Activity statistics for `table` from `pg_stat_user_tables` ({ live_tuples,
 /// dead_tuples, seq_scan, idx_scan, n_tup_ins, n_tup_upd, n_tup_del }). Reads
-/// the collected stats, not the live heap. `table` is bound via `$1::regclass`
+/// the collected stats, not the live heap. `table` is bound via `$1::text::regclass`
 /// against `relid`.
 fn op_table_stats(opts: Value) -> Result<Value> {
     let table = opts["table"]
@@ -1126,7 +1126,7 @@ fn op_table_stats(opts: Value) -> Result<Value> {
         let row = c.query_opt(
             "SELECT n_live_tup, n_dead_tup, seq_scan, idx_scan, \
              n_tup_ins, n_tup_upd, n_tup_del \
-             FROM pg_stat_user_tables WHERE relid = $1::regclass",
+             FROM pg_stat_user_tables WHERE relid = $1::text::regclass",
             &[&table],
         )?;
         match row {
