@@ -21,6 +21,8 @@ binary so the daily-driver install stays slim.
 
 ### [`strykelang`](https://github.com/MenkeTechnologies/strykelang) &middot; [`MenkeTechnologiesMeta`](https://github.com/MenkeTechnologies/MenkeTechnologiesMeta) · [`stryke-mysql`](https://github.com/MenkeTechnologies/stryke-mysql) · [`stryke-mongo`](https://github.com/MenkeTechnologies/stryke-mongo) · [`stryke-duckdb`](https://github.com/MenkeTechnologies/stryke-duckdb) · [`stryke-demo`](https://github.com/MenkeTechnologies/stryke-demo)
 
+### [`Read the Docs`](https://menketechnologies.github.io/stryke-postgres/) &middot; [`Engineering Report`](https://menketechnologies.github.io/stryke-postgres/report.html)
+
 ---
 
 ## Table of Contents
