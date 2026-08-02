@@ -86,7 +86,7 @@ The cdylib is dlopened in-process on first `use Postgres`. A
 use Postgres
 
 # Set $DATABASE_URL once, omit the named arg everywhere.
-$ENV{DATABASE_URL} = "postgres://wizard@127.0.0.1:5432/app"
+$ENV{DATABASE_URL} = "postgres://user@127.0.0.1:5432/app"
 
 # Single scalar.
 p Postgres::query_scalar "SELECT COUNT(*) FROM users"
