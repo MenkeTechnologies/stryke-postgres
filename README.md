@@ -42,8 +42,8 @@ binary so the daily-driver install stays slim.
 
 ## [0x00] Why this is a package, not a builtin
 
-Same rationale as [stryke-arrow](../stryke-arrow) and
-[stryke-mysql](../stryke-mysql): a real database client pulls in 100+
+Same rationale as [stryke-arrow](https://github.com/MenkeTechnologies/stryke-arrow) and
+[stryke-mysql](https://github.com/MenkeTechnologies/stryke-mysql): a real database client pulls in 100+
 transitive crates (TLS, async runtime, type encoders). Most stryke
 one-liners never touch Postgres; for the ones that do, opt in with this
 package.
